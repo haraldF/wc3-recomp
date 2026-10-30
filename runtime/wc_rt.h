@@ -66,6 +66,7 @@ static inline void mwr(uint64_t addr, int size, uint64_t v)
 extern uint32_t wc_sb[6];
 void seg_load(int reg, uint64_t selector);
 uint64_t seg_limit(uint64_t selector); /* LSL: the limit's low word, bit 16 set if the selector is valid */
+uint64_t seg_limit32(uint64_t selector); /* LSL: the whole limit, bit 32 set if the selector is valid */
 static inline uint64_t mrd32(uint64_t addr, int size)
 {
 	uint64_t v = 0;

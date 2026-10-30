@@ -27,8 +27,24 @@ generated and ignored.
   memory 56h (in paragraphs), base 5Eh (1000h: the image's offset in the segment), ESP 62h
   (129160h), EIP 68h (9D2DCh). Packing: blocks led by a length word; bit 15 set means a pattern
   (length byte, bytes) repeated to that length.
+- Header +5Ah: maximum extra memory, FFFFFFFFh (all there is). Given only the minimum, the game's
+  heap was ~1.8 MB and it stopped with "Not enough high memory": it wants 4.3 MB of free heap
+  (9b164), and the C library grows the segment by ~4.4 MB beyond the program's memory (PSP +5Ch)
+  right at startup, so that can't be all of it either: it gets 16 MB of a 32 MB segment.
 - Ghidra: BinaryLoader at the base, `x86:LE:32:default`, `gcc` cspec; `WcFlat32Setup.java` makes
   the entry a function before analysis. Analysis takes long (timeout 7200 s per file).
+- GOG starts the game on D: (the CD) with C: holding `WC3\WC3.CFG`; the game switches to C:, tests
+  that it can write there (`C:\TESTE.TST`), puts `SWAPFILE.$$$` in C:'s root, copies `WC3.CON`
+  from the CD to `C:\WC3`, looks for each `.TRE` archive on C: first, then on the CD drive MSCDEX
+  reports (150Dh: drive numbers, A: = 0).
+- It writes into the game folder: test with a scratch copy (`WC3/` copied, `DATA.DAT` and
+  `OBJECTS.TRE` linked), passed as `--iso copy/DATA.DAT`.
+- With a joystick present (ours always is unless `WC_JOYSTICK=0`) it shows a text-mode joystick
+  test grid ("Joystick val (x, y)") and waits.
+- No VESA BIOS: "No VESA Driver -- Cannot use SVGA" and it takes `MCGA.DLL` (320x200) instead of
+  `VESA480.DLL`; both are LX modules ("386FX", Miles Design 1992/93).
+- Sound: `hmidrv.386` on the CD is a library of HMI SOS drivers, one per card; the game loads the
+  one `WC3.CFG` names into memory and far-calls it (selector AFh, offset 0).
 
 ## Static recompilation (WcRecomp.java + runtime/)
 
@@ -40,6 +56,14 @@ generated and ignored.
   instructions, else the prefix's segment or DS. Segment register writes go through `seg_load()`.
 - `CALLF`/`JMPF m16:32` (far through memory) are modelled as near; the generator loads the far
   pointer (23 fixes). `IRETD` like `IRET`: `set_flags_word()`.
+- `LSL r32` keeps only the limit's low word in Ghidra's model (`Reg32 = zext(tmp:2)`): the C
+  library sizes its heap from DS's limit, got 0BFFFh and filled 4 GB with FFh. The generator emits
+  LSL itself (`seg_limit32()`).
+- Memory operands based on EBP or ESP default to SS, not DS: the C library's far copy (9cf8c) does
+  `LDS ESI,...` and then reads its count from `[EBP+18h]`. Harmless while DS = SS, which is why it
+  showed only there.
+- The C library's `int86()` writes `INT n; RET` on the stack and calls it: `run()` recognises those
+  bytes and does the interrupt and the return.
 - x87: Ghidra's 10-byte ST registers carry doubles here (x87_* helpers in `wc_rt.h`, `flat32.c`);
   PcodeOp names: FLOAT_FLOAT2FLOAT, FLOAT_INT2FLOAT, FLOAT_TRUNC. The helpers are named x87_* since
   `fcvt` collided with libc's.
@@ -60,18 +84,33 @@ generated and ignored.
   segments (AH=48h) from 2400000h up, a bump allocator.
 - Phar Lap's selectors: 0Ch code, 14h data, 1Ch screen (A0000h), 24h PSP, 2Ch environment, 34h the
   first MB. New descriptors from index 16, RPL 3. PSP +5Ch: the program's memory in bytes.
-- Calls so far: INT 21h AH=48h/49h/4Ah (segments), AX=2502h-2507h (vectors), 2520h (memory
-  statistics), 2526h (configuration: PSP/environment/first-MB selectors at +104h), 252Bh (page
-  locking: nothing to do); DPMI 0006h-0008h. Anything else stops with exit 2 and its name.
+- Calls so far: INT 21h AH=48h/49h/4Ah (segments; 48h with 0 pages for a segment that 250Ah then
+  maps), AX=2502h-2507h (vectors), 250Ah (map physical memory: the offset in EAX), 2511h (issue a
+  real-mode interrupt: segment registers, EAX, EDX in a block), 2517h (the DOS data buffer, here
+  9000:0000), 2520h (memory statistics), 2526h (configuration: PSP/environment/first-MB selectors
+  at +104h), 252Bh (page locking: nothing to do), 2531h (read/write an LDT descriptor), 2532h/2533h
+  (exception handlers), 25C0h-25C2h (conventional memory, 2000:0-9000:0); DPMI 0006h-0008h.
+  Anything else stops with exit 2 and its name.
+- Physical memory is linear memory here: a 250Ah mapping of an empty segment moves its base there.
 - Other INT 21h calls go to `dos.c` with `dos_pm` set: pointers DS:EDX/DS:ESI, counts ECX, results
   EAX. Interrupts go to the program's protected-mode handler if it set one, else the BIOS code in
   `pc.c` (no real-mode code ever runs).
 
+## The CD (runtime/iso.c, dos.c)
+
+- `DATA.DAT` is drive D: (`WC_CD=file` for another image): ISO 9660, primary volume descriptor
+  names only. Files there open read-only through a `dup` of the image's descriptor, read with
+  `pread`. Per-drive current directories; the program starts on D:. MSCDEX: 1500h, 150Bh, 150Ch,
+  150Dh (also through 2511h from protected mode, with real-mode ES:BX).
+
 ## State
 
-The startup runs ~17000 instructions to code reached through a pointer (`638c0`, not yet in
-`entries.txt`). Not looked at yet: the video modes (SVGA?), sound drivers, the joystick (`joystick.c`
-is how WC1 reads it), the web page (`web/` is still wc-decomp's, for WC1/WC2's files).
+With `WC_JOYSTICK=0`, ~2.1 M instructions: text-mode loading messages, the CD found, all `.TRE`
+archives opened, config read, video and sound drivers loaded; then the first far call into
+loaded code (the HMI driver from `hmidrv.386`) stops it ("missing code at 00000", CS=00AF). Code
+loaded at runtime needs what wc-decomp does for its drivers (capture or pre-recompile, dispatch
+by selector base). Nothing drawn yet. Not looked at yet: the joystick (`joystick.c` is how WC1
+reads it), the web page (`web/` is still wc-decomp's).
 
 ## Conventions
 

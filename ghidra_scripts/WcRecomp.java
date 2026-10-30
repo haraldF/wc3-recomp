@@ -42,13 +42,15 @@ import ghidra.program.model.symbol.Reference;
 public class WcRecomp extends GhidraScript {
 
 	private final Map<Long, String> entries = new HashMap<>(); // entry address -> C function name
-	private int farJumpFixes, iretFixes, unhandled;
+	private int farJumpFixes, iretFixes, lslFixes, unhandled;
 	/** unique offset -> address varnode it was loaded from, within the current instruction */
 	private final Map<Long, Varnode> loadAddrOf = new HashMap<>();
 
 	/** Per instruction: its segment override prefix (index into wc_sb[]: ES 0, CS 1, SS 2, DS 3, FS 4,
 	 * GS 5) or -1, whether it is a string instruction, and the uniques holding EDI */
 	private int override = -1;
+	/** whether the instruction's memory operand is based on EBP or ESP, so in SS by default */
+	private boolean stackBased;
 	private boolean stringOp;
 	private final Set<Long> ediUniques = new HashSet<>();
 
@@ -130,8 +132,8 @@ public class WcRecomp extends GhidraScript {
 		Files.write(out.resolve("image.bin"), image);
 		writeHeaderAndDispatch(out, owner, block.getEnd().getOffset() + 1);
 		println(String.format("WcRecomp: %d functions + %d discovered fragments, %d instructions in %d files; " +
-			"%d far jump fixes, %d IRET fixes, %d unhandled p-code ops", functions.size(), fragments.size(), owner.size(),
-			files.size(), farJumpFixes, iretFixes, unhandled));
+			"%d far jump fixes, %d IRET fixes, %d LSL fixes, %d unhandled p-code ops", functions.size(), fragments.size(),
+			owner.size(), files.size(), farJumpFixes, iretFixes, lslFixes, unhandled));
 	}
 
 	/** 16 KB of code per file, so the build can work in parallel */
@@ -247,6 +249,21 @@ public class WcRecomp extends GhidraScript {
 				.append("); /* ").append(ins.getAddress()).append(" ").append(ins.toString().replace("*/", "* /"))
 				.append(" */\n");
 
+		// Ghidra's LSL keeps only the limit's low word, even into a 32-bit register (the C library's
+		// heap takes its size from DS's limit): the whole limit, and ZF for a valid selector.
+		if (ins.getMnemonicString().equals("LSL") && ins.getRegister(0) != null && ins.getRegister(1) != null) {
+			var dst = ins.getRegister(0);
+			var src = ins.getRegister(1);
+			lslFixes++;
+			c.append("\t{ uint64_t l = seg_limit32(rd(0x").append(Long.toHexString(src.getOffset())).append(", 2)); ")
+					.append("if (l >> 32) wr(0x").append(Long.toHexString(dst.getOffset())).append(", ")
+					.append(dst.getMinimumByteSize()).append(", l); wr(0x206, 1, l >> 32); }\n");
+			if (next == null || next.getAddress().getOffset() != ins.getFallThrough().getOffset()) {
+				c.append('\t').append(jump(ins.getFallThrough().getOffset(), labels)).append('\n');
+			}
+			return;
+		}
+
 		PcodeOp[] ops = ins.getPcode(false);
 		boolean relative = false;
 		for (PcodeOp op : ops) {
@@ -255,6 +272,7 @@ public class WcRecomp extends GhidraScript {
 			}
 		}
 		override = segmentOverride(ins);
+		stackBased = STACK_BASED.matcher(ins.toString()).find();
 		stringOp = STRING_OPS.contains(ins.getMnemonicString().replaceAll("\\..*", ""));
 		ediUniques.clear();
 		loadAddrOf.clear();
@@ -473,7 +491,8 @@ public class WcRecomp extends GhidraScript {
 	/**
 	 * The base of the segment a memory access goes through. Ghidra ignores segments in 32-bit code:
 	 * stack accesses (PUSH, POP, CALL, RET: an 8-byte space constant) use SS, string instructions
-	 * write (and SCAS/CMPS read) ES:EDI, otherwise the prefix's segment, or DS.
+	 * write (and SCAS/CMPS read) ES:EDI, otherwise the prefix's segment, or SS for an operand based on
+	 * EBP or ESP (the C library's far copy loads DS with LDS, then reads its arguments), or DS.
 	 */
 	private String base(Varnode space, Varnode addr) {
 		if (space != null && space.isConstant() && space.getSize() == 8) {
@@ -483,7 +502,7 @@ public class WcRecomp extends GhidraScript {
 				addr.isRegister() && addr.getOffset() == 0x1c)) {
 			return "wc_sb[0]";
 		}
-		return "wc_sb[" + (override >= 0 ? override : 3) + "]";
+		return "wc_sb[" + (override >= 0 ? override : stackBased ? 2 : 3) + "]";
 	}
 
 	private void trackLoad(Varnode out, Varnode in) {
@@ -580,6 +599,7 @@ public class WcRecomp extends GhidraScript {
 		return sb.append("\n").append(body).toString();
 	}
 
+	private static final Pattern STACK_BASED = Pattern.compile("\\[E[BS]P[\\] ]");
 	private static final Pattern FUNCTION_NAME = Pattern.compile("\\bF_[0-9a-f]+\\b");
 
 	private void writeHeaderAndDispatch(Path out, TreeMap<Long, String> owner, long programSize) throws Exception {

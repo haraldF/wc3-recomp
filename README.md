@@ -4,8 +4,9 @@ Statically recompiles Wing Commander III: Heart of the Tiger (`WC3.EXE`, a 32-bi
 the Phar Lap 386|DOS-Extender) to C with Ghidra, driven from TypeScript, and builds it into a
 native macOS program with an emulated PC around it.
 
-Work in progress: the program starts and runs its first ~17000 instructions (the C library's
-startup); nothing is shown yet.
+Work in progress: the startup runs (~2 million instructions, text-mode loading messages, the
+game's files found on the CD image) up to the first call into a driver the game loads at runtime;
+nothing is drawn yet.
 
 It grew out of wc-decomp, the same for Wing Commander I and II (16-bit real-mode programs): the
 PC emulation (`runtime/`: DOS, BIOS, timer, keyboard, mouse, VGA, AdLib, MT-32, Sound Blaster, the

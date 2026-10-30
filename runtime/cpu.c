@@ -54,6 +54,13 @@ uint32_t code_addr(uint64_t linear)
 
 void run(uint32_t linear)
 {
+	/* The C library's int86() calls "INT n; RET" that it wrote on the stack: do that here */
+	uint32_t a = wc_sb[1] + linear;
+	if (find_code(linear) < 0 && a < MEM_SIZE - 3 && M[a] == 0xcd && M[a + 2] == 0xc3) {
+		cpu_int(M[a + 1], linear, linear + 2);
+		wr(R_SP, 4, rd(R_SP, 4) + 4); /* the RET: the caller continues after its call */
+		return;
+	}
 	run_code(code_addr(linear));
 }
 

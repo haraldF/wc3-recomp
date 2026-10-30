@@ -39,6 +39,7 @@ enum {
 	/* Phar Lap's selectors */
 	SEL_CODE = 0x0c, SEL_DATA = 0x14, SEL_SCREEN = 0x1c, SEL_PSP = 0x24, SEL_ENV = 0x2c, SEL_LOW = 0x34,
 	PSP_LINEAR = 0x10000, ENV_LINEAR = 0xf000,
+	DOS_BUFFER = 0x90000, DOS_BUFFER_SIZE = 0x4000, /* in conventional memory (9000:0000) */
 	NDESC = 1024,
 };
 
@@ -75,6 +76,13 @@ void seg_load(int reg, uint64_t selector)
 	wc_sb[reg] = i < NDESC && desc[i].used ? desc[i].base : 0;
 }
 
+uint64_t seg_limit32(uint64_t selector)
+{
+	unsigned i = (uint16_t)selector >> 3;
+	if (i >= NDESC || !desc[i].used) return 0;
+	return desc[i].limit | 1ull << 32;
+}
+
 uint64_t seg_limit(uint64_t selector)
 {
 	unsigned i = (uint16_t)selector >> 3;
@@ -91,9 +99,82 @@ static uint32_t alloc_linear(uint32_t size)
 	return a;
 }
 
+/* ---- conventional memory (AX=25C0h-25C2h): blocks between DOS_LOW and DOS_BUFFER, in paragraphs ---- */
+
+enum { DOS_LOW = 0x2000, DOS_HIGH = DOS_BUFFER >> 4, NBLOCKS = 256 };
+static struct { uint16_t seg, size; } dos_blocks[NBLOCKS]; /* sorted by segment */
+static int ndos_blocks;
+
+/* The segment of a free gap of size paragraphs, 0 if none; *largest: the largest gap */
+static uint16_t dos_gap(uint32_t size, uint32_t *largest)
+{
+	uint32_t at = DOS_LOW;
+	*largest = 0;
+	for (int i = 0; i <= ndos_blocks; i++) {
+		uint32_t end = i < ndos_blocks ? dos_blocks[i].seg : DOS_HIGH;
+		if (end - at > *largest) *largest = end - at;
+		if (end - at >= size) return (uint16_t)at;
+		if (i < ndos_blocks) at = dos_blocks[i].seg + dos_blocks[i].size;
+	}
+	return 0;
+}
+
+static int dos_block(uint16_t seg)
+{
+	for (int i = 0; i < ndos_blocks; i++) {
+		if (dos_blocks[i].seg == seg) return i;
+	}
+	return -1;
+}
+
+static void dos_alloc(uint32_t size)
+{
+	uint32_t largest;
+	uint16_t seg = ndos_blocks < NBLOCKS ? dos_gap(size, &largest) : 0;
+	if (!seg) {
+		set_cf(1);
+		wr(R_AX, 4, 8);
+		wr(R_BX, 4, ndos_blocks < NBLOCKS ? largest : 0);
+		return;
+	}
+	int i = 0;
+	while (i < ndos_blocks && dos_blocks[i].seg < seg) i++;
+	memmove(dos_blocks + i + 1, dos_blocks + i, (ndos_blocks - i) * sizeof *dos_blocks);
+	dos_blocks[i].seg = seg;
+	dos_blocks[i].size = (uint16_t)size;
+	ndos_blocks++;
+	wr(R_AX, 4, seg);
+}
+
+static void dos_free(uint16_t seg)
+{
+	int i = dos_block(seg);
+	if (i < 0) {
+		set_cf(1);
+		wr(R_AX, 4, 9);
+		return;
+	}
+	memmove(dos_blocks + i, dos_blocks + i + 1, (ndos_blocks - i - 1) * sizeof *dos_blocks);
+	ndos_blocks--;
+}
+
+static void dos_resize(uint16_t seg, uint32_t size)
+{
+	int i = dos_block(seg);
+	uint32_t end = i + 1 < ndos_blocks ? dos_blocks[i + 1].seg : DOS_HIGH;
+	if (i < 0 || seg + size > end) {
+		set_cf(1);
+		wr(R_AX, 4, i < 0 ? 9 : 8);
+		wr(R_BX, 4, i < 0 ? 0 : end - seg);
+		return;
+	}
+	dos_blocks[i].size = (uint16_t)size;
+}
+
 /* ---- protected-mode interrupts ---- */
 
 static struct { uint16_t sel; uint32_t off; } pm_vec[256]; /* sel 0: the runtime's own */
+static struct { uint16_t sel; uint32_t off; } exc_vec[32]; /* processor exceptions' handlers */
 
 /* Call the program's handler for vector n like the CPU does: EFLAGS, CS and EIP (of `ret`, a code
  * address) on the stack, interrupts off; its IRETD returns to here. */
@@ -155,6 +236,11 @@ void flat32_int(uint64_t n, uint32_t at, uint32_t next)
 	case 0x31:
 		dpmi(at);
 		return;
+	case 0x2f: /* MSCDEX: pointers like DOS's */
+		dos_pm = 1;
+		dos_int(0x2f, at);
+		dos_pm = 0;
+		return;
 	default:
 		dos_int(n, at); /* the BIOS services and the mouse: no pointers yet */
 		return;
@@ -169,6 +255,36 @@ static _Noreturn void unknown(const char *what, unsigned fn, uint32_t at)
 	fprintf(stderr, "wc: unimplemented %s %04x at %05x\n", what, fn, at);
 	cpu_report(stderr);
 	host_exit(2);
+}
+
+/* AX=2511h: the interrupt with the real-mode segment registers and EAX/EDX from the block (+0
+ * interrupt, +2 DS, +4 ES, +6 FS, +8 GS, +0Ah EAX, +0Eh EDX), the other registers as they are;
+ * the results go back into the block and EAX. */
+static void real_interrupt(uint32_t b, uint32_t at)
+{
+	uint16_t n = (uint16_t)mrd32(b, 2);
+	if (wc_trace) {
+		fprintf(stderr, "wc: real-mode INT %02xh DS=%04llx ES=%04llx EAX=%08llx EDX=%08llx EBX=%08llx ECX=%08llx\n", n,
+			mrd32(b + 2, 2), mrd32(b + 4, 2), mrd32(b + 10, 4), mrd32(b + 14, 4), rd(R_BX, 4), rd(R_CX, 4));
+	}
+	uint16_t sel[6];
+	for (int r = 0; r < 6; r++) sel[r] = (uint16_t)rd(0x100 + 2 * r, 2);
+	uint64_t edx = rd(R_DX, 4);
+	wr(R_DS, 2, mrd32(b + 2, 2));
+	wr(R_ES, 2, mrd32(b + 4, 2));
+	wr(R_FS, 2, mrd32(b + 6, 2));
+	wr(R_GS, 2, mrd32(b + 8, 2));
+	wr(R_AX, 4, mrd32(b + 10, 4));
+	wr(R_DX, 4, mrd32(b + 14, 4));
+	dos_int(n, at);
+	mwr32(b + 2, 2, rd(R_DS, 2));
+	mwr32(b + 4, 2, rd(R_ES, 2));
+	mwr32(b + 6, 2, rd(R_FS, 2));
+	mwr32(b + 8, 2, rd(R_GS, 2));
+	mwr32(b + 10, 4, rd(R_AX, 4));
+	mwr32(b + 14, 4, rd(R_DX, 4));
+	for (int r = 0; r < 6; r++) wr(0x100 + 2 * r, 2, sel[r]); /* the bases in wc_sb[] never changed */
+	wr(R_DX, 4, edx);
 }
 
 static void pharlap(uint32_t at)
@@ -231,9 +347,85 @@ static void pharlap(uint32_t at)
 		pm_vec[cl].off = edx;
 		mwr(cl * 4, 4, ebx);
 		break;
-	case 0x20: { /* memory statistics into DS:EDX (100 bytes): +0Ch the free 4 KB pages */
+	case 0x0a: { /* map ECX pages of physical memory at EBX to the end of segment ES: EAX = its offset.
+		* Physical is linear here: an empty segment moves there, others reach it by wrapping around */
+		uint16_t es = (uint16_t)rd(R_ES, 2);
+		unsigned i = es >> 3;
+		if (i >= NDESC || !desc[i].used) {
+			set_cf(1);
+			wr(R_AX, 4, 9);
+			break;
+		}
+		uint32_t size = (uint32_t)rd(R_CX, 4) * 4096;
+		if (desc[i].limit == 0xffffffffu) { /* empty (allocated with 0 pages) */
+			desc[i].base = ebx;
+			desc[i].limit = size - 1;
+			wr(R_AX, 4, 0);
+		}
+		else {
+			wr(R_AX, 4, ebx - desc[i].base);
+			desc[i].limit = 0xffffffffu;
+		}
+		for (int r = 0; r < 6; r++) {
+			if ((uint16_t)rd(0x100 + 2 * r, 2) == es) seg_load(r, es);
+		}
+		if (wc_trace) fprintf(stderr, "wc: mapped at %04x:%08llx (base %08x)\n", es, rd(R_AX, 4), desc[i].base);
+		break;
+	}
+	case 0x11: /* issue a real-mode interrupt: DS:EDX a parameter block */
+		real_interrupt(ds + edx, at);
+		break;
+	case 0x17: /* the DOS data buffer (for real-mode calls): ES:EBX, real-mode address ECX, size EDX */
+		seg_load(0, SEL_LOW);
+		wr(R_BX, 4, DOS_BUFFER);
+		wr(R_CX, 4, DOS_BUFFER << 12);
+		wr(R_DX, 4, DOS_BUFFER_SIZE);
+		break;
+	case 0x31: { /* read (ECX 0) or write (1) the descriptor of selector BX at DS:EDX (8 bytes) */
+		unsigned i = (uint16_t)ebx >> 3;
+		uint8_t *d = M + ds + edx;
+		if (i >= NDESC) {
+			set_cf(1);
+			break;
+		}
+		if (rd(R_CX, 4) == 0) {
+			uint32_t base = desc[i].base, limit = desc[i].limit, g = limit > 0xfffff;
+			if (g) limit >>= 12;
+			uint8_t bytes[8] = { (uint8_t)limit, (uint8_t)(limit >> 8), (uint8_t)base, (uint8_t)(base >> 8),
+				(uint8_t)(base >> 16), 0xf2, (uint8_t)((limit >> 16 & 15) | 0x40 | g << 7), (uint8_t)(base >> 24) };
+			memcpy(d, bytes, 8);
+			break;
+		}
+		uint32_t limit = d[0] | d[1] << 8 | (d[6] & 15) << 16;
+		desc[i].base = d[2] | d[3] << 8 | d[4] << 16 | (uint32_t)d[7] << 24;
+		desc[i].limit = d[6] & 0x80 ? limit << 12 | 0xfff : limit;
+		desc[i].used = 1;
+		for (int r = 0; r < 6; r++) {
+			if ((uint16_t)rd(0x100 + 2 * r, 2) >> 3 == i) seg_load(r, rd(0x100 + 2 * r, 2));
+		}
+		break;
+	}
+	case 0x32: /* get the handler of processor exception CL: ES:EBX */
+		seg_load(0, exc_vec[cl & 31].sel ? exc_vec[cl & 31].sel : SEL_CODE);
+		wr(R_BX, 4, exc_vec[cl & 31].off);
+		break;
+	case 0x33: /* set the handler of processor exception CL to DS:EDX (no exceptions happen here) */
+		exc_vec[cl & 31].sel = (uint16_t)rd(R_DS, 2);
+		exc_vec[cl & 31].off = edx;
+		break;
+	case 0xc0: /* allocate BX paragraphs of conventional memory: AX = the segment */
+		dos_alloc((uint16_t)ebx);
+		break;
+	case 0xc1: /* free the conventional memory block at segment CX */
+		dos_free((uint16_t)rd(R_CX, 2));
+		break;
+	case 0xc2: /* resize the block at CX to BX paragraphs */
+		dos_resize((uint16_t)rd(R_CX, 2), (uint16_t)ebx);
+		break;
+	case 0x20: { /* memory statistics into DS:EDX (100 bytes): +0Ch the 4 KB pages the program may have
+		* (the C library's startup takes the program's memory, PSP +5Ch, from them) */
 		memset(M + ds + edx, 0, 100);
-		uint32_t pages = (MEM_SIZE - heap_next) / 4096;
+		uint32_t pages = (PROGRAM_MAX + MEM_SIZE - heap_next) / 4096; /* the program's and what is left */
 		memcpy(M + ds + edx + 0x0c, &pages, 4);
 		break;
 	}
@@ -310,7 +502,11 @@ void flat32_start(const char *dir, int argc, char **argv, void (*set_command_lin
 	psp[3] = 0xa0;
 	psp[0x2c] = SEL_ENV & 0xff;
 	psp[0x2d] = SEL_ENV >> 8;
-	uint32_t need = wc_program.flat_size;
+	/* the header asks for at least flat_size and at most everything (maximum extra memory FFFFFFFFh):
+	 * 16 MB, as on a PC with that much. The C library makes its heap there (with only the minimum,
+	 * the game said it lacked "high memory": it wants 4.3 MB of heap) and then grows the segment by
+	 * ~4.4 MB more, so not all of PROGRAM_MAX */
+	uint32_t need = PROGRAM_MAX / 2;
 	memcpy(psp + 0x5c, &need, 4);
 	set_command_line(psp, argc, argv);
 	wc_psp_seg = PSP_LINEAR >> 4;

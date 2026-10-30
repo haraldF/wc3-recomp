@@ -1,6 +1,7 @@
 /* Software interrupts: a small DOS (INT 21h) on top of the host file system, plus BIOS stubs.
- * Anything not implemented stops the program with the function number, so the next piece of
- * work is obvious. */
+ * Drive C: is the game folder, D: the game's CD (iso.c, read-only, and MSCDEX on INT 2Fh); the
+ * program starts on D:, as GOG's DOSBox starts it. Anything not implemented stops the program with
+ * the function number, so the next piece of work is obvious. */
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
@@ -14,6 +15,7 @@
 #include <unistd.h>
 
 #include "host.h"
+#include "iso.h"
 #include "wc_rt.h"
 
 void cpu_report(FILE *f);
@@ -27,7 +29,16 @@ static int handles[MAX_HANDLES] = { 0, 1, 2, -1, -1 }; /* DOS handle -> host fd;
 static char handle_path[MAX_HANDLES][1024];
 static uint8_t handle_changed[MAX_HANDLES];
 static uint32_t dta;
-static char cwd[128]; /* current directory below the game folder, DOS style, no leading backslash */
+enum { DRIVE_C = 2, DRIVE_CD = 3 };
+static int cur_drive = DRIVE_CD;
+static char cwds[26][128]; /* each drive's current directory, DOS style, no leading backslash */
+/* the CD's open files: where they are in the image, their size and position */
+static struct { uint64_t start; uint32_t size, pos; uint8_t open; } cd_file[MAX_HANDLES];
+
+static int cd_present(void)
+{
+	return iso_fd(wc_game_dir) >= 0;
+}
 
 static void init_handles(void)
 {
@@ -94,18 +105,22 @@ static void get_str(uint32_t addr, char *buf, size_t size)
 	buf[i] = 0;
 }
 
-/* Absolute DOS path (no drive, no leading backslash, no "." or "..") from a path relative to cwd. */
-static void dos_absolute(const char *dos, char *out, size_t size)
+/* Absolute DOS path (no drive, no leading backslash, no "." or "..") from a path relative to its
+ * drive's current directory; returns the drive (0 = A:). */
+static int dos_absolute(const char *dos, char *out, size_t size)
 {
 	char joined[256];
+	int drive = cur_drive;
 	if (dos[0] && dos[1] == ':') {
+		drive = toupper((unsigned char)dos[0]) - 'A';
+		if (drive < 0 || drive >= 26) drive = cur_drive;
 		dos += 2;
 	}
 	if (dos[0] == '\\' || dos[0] == '/') {
 		snprintf(joined, sizeof joined, "%s", dos);
 	}
 	else {
-		snprintf(joined, sizeof joined, "%s\\%s", cwd, dos);
+		snprintf(joined, sizeof joined, "%s\\%s", cwds[drive], dos);
 	}
 	out[0] = 0;
 	for (char *part = strtok(joined, "\\/"); part; part = strtok(NULL, "\\/")) {
@@ -120,6 +135,13 @@ static void dos_absolute(const char *dos, char *out, size_t size)
 		size_t len = strlen(out);
 		snprintf(out + len, size - len, "%s%s", len ? "\\" : "", part);
 	}
+	return drive;
+}
+
+/* Whether a DOS path is on the CD; abs gets its path there. */
+static int on_cd(const char *dos, char *abs, size_t size)
+{
+	return dos_absolute(dos, abs, size) == DRIVE_CD;
 }
 
 /* DOS path -> host path under the game folder, matching each component case-insensitively. */
@@ -199,17 +221,54 @@ static int host_fd(uint64_t h)
 	return h < MAX_HANDLES ? handles[h] : -1;
 }
 
+/* A file on the CD: read-only, through its own descriptor of the image. */
+static void open_cd(const char *dos, const char *abs, int flags, const char *what)
+{
+	struct iso_entry e;
+	int found = cd_present() && iso_lookup(abs, &e);
+	if (wc_trace) {
+		fprintf(stderr, "wc: %s \"%s\" on the CD%s\n", what, dos, found ? "" : " (not found)");
+	}
+	if (!found) {
+		fail_dos(2);
+		return;
+	}
+	if (e.dir || (flags & (O_WRONLY | O_RDWR | O_CREAT))) {
+		fail_dos(5);
+		return;
+	}
+	int h = new_handle(dup(iso_fd(wc_game_dir)));
+	if (h < 0) {
+		fail_dos(4);
+		return;
+	}
+	handle_path[h][0] = 0;
+	handle_changed[h] = 0;
+	cd_file[h].start = e.offset;
+	cd_file[h].size = e.size;
+	cd_file[h].pos = 0;
+	cd_file[h].open = 1;
+	set_ax(h);
+	ok();
+}
+
 static void open_file(int flags, const char *what)
 {
-	char dos[128], path[1024];
+	char dos[128], abs[256], path[1024];
 	get_str(ds_dx(), dos, sizeof dos);
+	if (on_cd(dos, abs, sizeof abs)) {
+		open_cd(dos, abs, flags, what);
+		return;
+	}
 	host_path(dos, path, sizeof path);
 	struct stat st;
 	int fd = !dos[0] ? (errno = ENOENT, -1)
 		: stat(path, &st) == 0 && S_ISDIR(st.st_mode) ? (errno = EACCES, -1) /* DOS can't open folders */
 		: open(path, flags, 0644);
 	if (wc_trace) {
-		fprintf(stderr, "wc: %s \"%s\" -> %s%s\n", what, dos, path, fd < 0 ? " (failed)" : "");
+		fprintf(stderr, "wc: %s \"%s\" -> %s%s", what, dos, path, fd < 0 ? " (failed)" : "");
+		if (dos[0] && (unsigned char)dos[0] < 32) fprintf(stderr, " (first byte %02x)", (unsigned char)dos[0]);
+		fprintf(stderr, "\n");
 	}
 	if (fd < 0) {
 		fail_dos(dos_error());
@@ -235,6 +294,33 @@ void bios_key_flush(void);
 /* ---- find first/next: 8.3 names in one folder, matched like DOS against an 11-character pattern ---- */
 
 static char find_dir[1024];
+static int find_on_cd;
+static struct iso_entry find_cd_dir;
+static void to_fcb(const char *name, char fcb[11]);
+static int fcb_match(const char *pattern, const char *fcb);
+
+/* find_next on the CD */
+static int find_next_cd(const char *pattern, uint8_t attr, uint32_t index)
+{
+	struct iso_entry e;
+	for (uint32_t n = index; iso_entry_at(&find_cd_dir, n, &e); n++) {
+		char fcb[11];
+		to_fcb(e.name, fcb);
+		if (!fcb_match(pattern, fcb) || (e.dir && !(attr & 0x10))) continue;
+		M[dta + 0x15] = e.dir ? 0x11 : 0x21;
+		put(dta + 0x16, 2, e.date[3] << 11 | e.date[4] << 5 | e.date[5] / 2);
+		put(dta + 0x18, 2, (e.date[0] - 80) << 9 | e.date[1] << 5 | e.date[2]);
+		put(dta + 0x1a, 4, e.size);
+		int i = 0;
+		for (const char *c = e.name; *c && i < 12; c++) M[dta + 0x1e + i++] = (uint8_t)*c;
+		M[dta + 0x1e + i] = 0;
+		put(dta + 12, 4, n + 1);
+		ok();
+		return 1;
+	}
+	fail_dos(0x12);
+	return 0;
+}
 
 /* "SAVEGAME.WC2", "*.*" -> "SAVEGAMEWC2", "???????????" (upper case, '?' matches anything) */
 static void to_fcb(const char *name, char fcb[11])
@@ -272,6 +358,10 @@ static void find_next(void)
 	uint8_t attr = M[dta];
 	uint32_t index;
 	memcpy(&index, M + dta + 12, 4);
+	if (find_on_cd) {
+		find_next_cd(pattern, attr, index);
+		return;
+	}
 	DIR *d = opendir(find_dir);
 	struct dirent *e;
 	for (uint32_t n = 0; d && (e = readdir(d)); n++) {
@@ -371,11 +461,12 @@ static void dos(uint32_t at)
 			wr(R_AH, 1, 0x0c);
 		}
 		break;
-	case 0x0e: /* select disk */
+	case 0x0e: /* select disk: C:, or D: with the CD */
+		if (DL == DRIVE_C || (DL == DRIVE_CD && cd_present())) cur_drive = DL;
 		wr(R_AL, 1, 26);
 		break;
-	case 0x19: /* current disk: C: */
-		wr(R_AL, 1, 2);
+	case 0x19: /* current disk */
+		wr(R_AL, 1, cur_drive);
 		break;
 	case 0x1a: /* set DTA */
 		dta = ds_dx();
@@ -421,18 +512,54 @@ static void dos(uint32_t at)
 	case 0x3b: { /* change directory */
 		char dos[128], abs[256], path[1024];
 		struct stat st;
+		struct iso_entry e;
 		get_str(ds_dx(), dos, sizeof dos);
-		dos_absolute(dos, abs, sizeof abs);
+		int drive = dos_absolute(dos, abs, sizeof abs);
 		host_path(dos, path, sizeof path);
-		if (stat(path, &st) < 0 || !S_ISDIR(st.st_mode)) {
+		if (drive == DRIVE_CD ? !cd_present() || !iso_lookup(abs, &e) || !e.dir
+			: stat(path, &st) < 0 || !S_ISDIR(st.st_mode)) {
 			fail_dos(3);
 			break;
 		}
-		snprintf(cwd, sizeof cwd, "%s", abs);
+		snprintf(cwds[drive], sizeof cwds[drive], "%s", abs);
 		if (wc_trace) {
-			fprintf(stderr, "wc: chdir \"%s\" -> \\%s\n", dos, cwd);
+			fprintf(stderr, "wc: chdir \"%s\" -> %c:\\%s\n", dos, 'A' + drive, cwds[drive]);
 		}
 		ok();
+		break;
+	}
+	case 0x36: /* free disk space of drive DL (0: current): clusters of 8 sectors of 512 bytes */
+		if ((DL ? DL - 1 : cur_drive) == DRIVE_CD) {
+			wr(R_AX, 2, 4);
+			wr(R_BX, 2, 0);
+			wr(R_CX, 2, 512);
+			wr(R_DX, 2, 0xffff);
+		}
+		else {
+			wr(R_AX, 2, 8);
+			wr(R_BX, 2, 0xfff0); /* 256 MB free */
+			wr(R_CX, 2, 512);
+			wr(R_DX, 2, 0xfff0);
+		}
+		break;
+	case 0x39: case 0x3a: { /* make, remove a directory */
+		char dos[128], abs[256], path[1024];
+		get_str(ds_dx(), dos, sizeof dos);
+		if (on_cd(dos, abs, sizeof abs)) {
+			fail_dos(5);
+			break;
+		}
+		host_path(dos, path, sizeof path);
+		int r = ah == 0x39 ? mkdir(path, 0755) : rmdir(path);
+		if (wc_trace) {
+			fprintf(stderr, "wc: %s \"%s\" -> %s%s\n", ah == 0x39 ? "mkdir" : "rmdir", dos, path, r < 0 ? " (failed)" : "");
+		}
+		if (r < 0) {
+			fail_dos(errno == EEXIST ? 5 : dos_error());
+		}
+		else {
+			ok();
+		}
 		break;
 	}
 	case 0x3c: /* create */
@@ -450,6 +577,7 @@ static void dos(uint32_t at)
 		if (BX >= 5) {
 			close(fd);
 			handles[BX] = -1;
+			cd_file[BX].open = 0;
 			if (handle_changed[BX]) {
 				handle_changed[BX] = 0;
 				host_file_saved(handle_path[BX]);
@@ -465,7 +593,15 @@ static void dos(uint32_t at)
 			break;
 		}
 		uint64_t n = count_cx(), base = ds_dx();
-		ssize_t got = read(fd, M + base, n);
+		ssize_t got;
+		if (cd_file[BX].open) {
+			uint32_t left = cd_file[BX].pos < cd_file[BX].size ? cd_file[BX].size - cd_file[BX].pos : 0;
+			got = pread(fd, M + base, n < left ? n : left, (off_t)(cd_file[BX].start + cd_file[BX].pos));
+			if (got > 0) cd_file[BX].pos += (uint32_t)got;
+		}
+		else {
+			got = read(fd, M + base, n);
+		}
 		if (got < 0) {
 			fail_dos(5);
 			break;
@@ -481,6 +617,10 @@ static void dos(uint32_t at)
 			break;
 		}
 		uint64_t n = count_cx(), base = ds_dx();
+		if (cd_file[BX].open) {
+			fail_dos(5);
+			break;
+		}
 		if (fd <= 2) {
 			fflush(stdout);
 		}
@@ -497,8 +637,12 @@ static void dos(uint32_t at)
 		break;
 	}
 	case 0x41: { /* delete */
-		char dos[128], path[1024];
+		char dos[128], abs[256], path[1024];
 		get_str(ds_dx(), dos, sizeof dos);
+		if (on_cd(dos, abs, sizeof abs)) {
+			fail_dos(5);
+			break;
+		}
 		host_path(dos, path, sizeof path);
 		if (unlink(path) < 0) {
 			fail_dos(dos_error());
@@ -516,7 +660,14 @@ static void dos(uint32_t at)
 			break;
 		}
 		off_t off = (off_t)(int32_t)((CX << 16) | DX);
-		off_t pos = lseek(fd, off, AL == 0 ? SEEK_SET : AL == 1 ? SEEK_CUR : SEEK_END);
+		off_t pos;
+		if (cd_file[BX].open) {
+			pos = off + (AL == 0 ? 0 : AL == 1 ? cd_file[BX].pos : cd_file[BX].size);
+			if (pos >= 0) cd_file[BX].pos = (uint32_t)pos;
+		}
+		else {
+			pos = lseek(fd, off, AL == 0 ? SEEK_SET : AL == 1 ? SEEK_CUR : SEEK_END);
+		}
 		if (pos < 0) {
 			fail_dos(0x19);
 			break;
@@ -527,9 +678,23 @@ static void dos(uint32_t at)
 		break;
 	}
 	case 0x43: { /* get/set attributes */
-		char dos[128], path[1024];
+		char dos[128], abs[256], path[1024];
 		struct stat st;
 		get_str(ds_dx(), dos, sizeof dos);
+		if (on_cd(dos, abs, sizeof abs)) {
+			struct iso_entry e;
+			if (!cd_present() || !iso_lookup(abs, &e)) {
+				fail_dos(2);
+			}
+			else if (AL) {
+				fail_dos(5);
+			}
+			else {
+				wr(R_CX, 2, e.dir ? 0x11 : 0x21); /* read-only */
+				ok();
+			}
+			break;
+		}
 		host_path(dos, path, sizeof path);
 		if (stat(path, &st) < 0) {
 			fail_dos(dos_error());
@@ -557,9 +722,12 @@ static void dos(uint32_t at)
 		}
 		break;
 	case 0x47: /* current directory */
-		for (size_t i = 0; i <= strlen(cwd); i++) {
-			M[ds_si() + i] = (uint8_t)cwd[i];
+	{
+		const char *dir = cwds[DL ? (DL - 1) % 26 : cur_drive];
+		for (size_t i = 0; i <= strlen(dir); i++) {
+			M[ds_si() + i] = (uint8_t)dir[i];
 		}
+	}
 		ok();
 		break;
 	case 0x4a: /* resize memory block: always fits */
@@ -579,10 +747,20 @@ static void dos(uint32_t at)
 		for (char *p = dos; *p; p++) {
 			if (*p == '\\' || *p == '/' || *p == ':') name = p + 1;
 		}
-		char fcb[11];
+		char fcb[11], abs[256];
 		to_fcb(name, fcb);
 		*name = 0;
-		host_path(dos, find_dir, sizeof find_dir); /* one search folder at a time */
+		find_on_cd = on_cd(dos, abs, sizeof abs);
+		if (find_on_cd) {
+			if (!cd_present() || !iso_lookup(abs, &find_cd_dir) || !find_cd_dir.dir) {
+				fail_dos(3);
+				break;
+			}
+			snprintf(find_dir, sizeof find_dir, "D:\\%s", abs);
+		}
+		else {
+			host_path(dos, find_dir, sizeof find_dir); /* one search folder at a time */
+		}
 		M[dta] = (uint8_t)CX;
 		memcpy(M + dta + 1, fcb, 11);
 		put(dta + 12, 4, 0);
@@ -611,6 +789,43 @@ static uint64_t bios_ticks(void)
 	struct tm *tm = localtime(&ts.tv_sec);
 	double secs = tm->tm_hour * 3600 + tm->tm_min * 60 + tm->tm_sec + ts.tv_nsec / 1e9;
 	return (uint64_t)(secs * 1193180.0 / 65536.0);
+}
+
+/* INT 2Fh: MSCDEX (AX=15xxh) with the CD as drive D:, version 2.21; nothing else is installed
+ * (AL stays as it was). */
+static void multiplex(uint32_t at)
+{
+	uint16_t ax = (uint16_t)AX;
+	if (wc_trace) {
+		fprintf(stderr, "wc: INT 2Fh AX=%04x BX=%04llx CX=%04llx at %05x\n", ax, BX, CX, at);
+	}
+	switch (ax) {
+	case 0x1500: /* installation check: BX drives, CX the first */
+		wr(R_BX, 2, cd_present() ? 1 : 0);
+		wr(R_CX, 2, DRIVE_CD);
+		break;
+	case 0x150b: /* is drive CX a CD drive */
+		wr(R_AX, 2, CX == DRIVE_CD && cd_present() ? 0x5ad8 : 0);
+		wr(R_BX, 2, 0xadad);
+		break;
+	case 0x150c: /* version */
+		wr(R_BX, 2, 0x0215);
+		break;
+	case 0x150d: { /* the CD drives' letters into ES:BX */
+		uint32_t a = dos_pm ? wc_sb[0] + (uint32_t)rd(R_BX, 4) : (uint32_t)lin(ES, BX);
+		M[a] = DRIVE_CD;
+		if (wc_trace) fprintf(stderr, "wc: MSCDEX drive letters at %05x\n", a);
+		break;
+	}
+	default:
+		if ((ax >> 8) == 0x15) {
+			fflush(stdout);
+			fprintf(stderr, "wc: unimplemented MSCDEX function INT 2Fh AX=%04x at %05x\n", ax, at);
+			cpu_report(stderr);
+			host_exit(2);
+		}
+		break;
+	}
 }
 
 /* The BIOS and DOS services behind the vectors' initial F000:nn entries. */
@@ -685,6 +900,9 @@ void dos_int(uint64_t n, uint32_t at)
 		return;
 	case 0x67:
 		ems_int(at);
+		return;
+	case 0x2f:
+		multiplex(at);
 		return;
 	default:
 		fflush(stdout);
