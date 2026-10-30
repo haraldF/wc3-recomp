@@ -106,6 +106,10 @@ generated and ignored.
   full throttle there flies into the bay. Script (after the load steps, with the mouse centred):
   `27500:@300.100,27900:+lmb,28000:-lmb,30000:+esc,30010:-esc,38000:@160.100,40000:+a,40100:-a,
   50000:+a,50100:-a` (autopilot), then Space (guns), t (target), Enter (missile).
+- Afterburner: with a mouse, Tab does nothing; that's the game. Each frame its keyboard routine sets
+  the afterburner bit (4cccd, from Tab's key state at 124D33h) and then its mouse routine rebuilds
+  the bit from its own state (4da79). With the mouse it is the right button tapped, then held
+  (`+rmb`, `-rmb` 30 ticks later, `+rmb` again 50 after that): 1200 kps.
 
 ## Static recompilation (WcRecomp.java + runtime/)
 
