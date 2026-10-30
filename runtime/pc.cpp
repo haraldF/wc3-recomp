@@ -36,6 +36,7 @@ static void bios_work(uint8_t n, uint32_t at);
 void ems_init(void);
 uint8_t joystick_in(void);
 void joystick_out(void);
+int joystick_busy(void);
 void vga_out(uint64_t port, uint64_t value);
 void vga_poll(uint64_t now);
 void vga_init(void);
@@ -132,6 +133,7 @@ static uint8_t pit_access = 3, pit_mode = 3, pit_low_next = 1, pit_low;
 static uint64_t pit_next_ns, pit_period_ns, pit_start_ns;
 static uint16_t pit_latch;
 static uint8_t pit_latched, pit_read_low_next = 1;
+static uint8_t pit_status, pit_status_latched; /* from a read-back command, read before the count */
 
 static void pit_set(uint32_t divisor)
 {
@@ -146,13 +148,24 @@ static void pit_set(uint32_t divisor)
 
 /* The counter as the game reads it: counting down at 1.193182 MHz from the divisor; in mode 3
  * (square wave) by 2 per clock, twice per period. */
-static uint16_t pit_count(void)
+static uint64_t pit_clocks(void)
 {
-	uint64_t clocks = (pc_now_ns() - pit_start_ns) * 1193182u / 1000000000u;
+	return (pc_now_ns() - pit_start_ns) * 1193182u / 1000000000u;
+}
+
+static uint16_t pit_count(uint64_t clocks = pit_clocks())
+{
 	if (pit_mode == 3) {
 		return (uint16_t)((pit_divisor - (clocks * 2) % pit_divisor) & 0xfffe);
 	}
 	return (uint16_t)(pit_divisor - clocks % pit_divisor);
+}
+
+/* The output: in mode 3 high for the first half of each period. */
+static int pit_output(uint64_t clocks)
+{
+	if (pit_mode == 3) return (clocks * 2 / pit_divisor) % 2 == 0;
+	return 1;
 }
 
 /* ---- keyboard ---- */
@@ -516,7 +529,7 @@ static void throttle(void)
 		throttle_start_icount = wc_icount;
 	}
 	uint64_t due_ns = throttle_start_ns + (wc_icount - throttle_start_icount) * 1000000u / cycles;
-	if (due_ns > now + 1000000u) { /* more than 1 ms ahead: wait */
+	if (due_ns > now + 1000000u && !joystick_busy()) { /* more than 1 ms ahead: wait */
 		struct timespec ts = { 0, (long)(due_ns - now) };
 		nanosleep(&ts, NULL);
 	}
@@ -628,6 +641,11 @@ uint64_t port_in(uint64_t port, int size)
 	case 0x20: v = pic_in_service; break;
 	case 0x21: v = pic_mask; break;
 	case 0x40: { /* timer channel 0 counter: latched or live, low byte then high byte */
+		if (pit_status_latched) {
+			pit_status_latched = 0;
+			v = pit_status;
+			break;
+		}
 		uint16_t c = pit_latched ? pit_latch : pit_count();
 		if (pit_access == 2 || (pit_access == 3 && !pit_read_low_next)) {
 			v = c >> 8;
@@ -671,7 +689,20 @@ void port_out(uint64_t port, uint64_t value, int size)
 	case 0x330: case 0x331: mt32_out(port, value); break;
 	default: if (sb_port(port)) sb_out(port, value); break;
 	case 0x43:
-		if ((value >> 6) == 0) { /* channel 0 */
+		if ((value >> 6) == 3) { /* read-back (Wing Commander III times the joystick with it) */
+			if (!(value & 2)) break; /* not channel 0 */
+			uint64_t clocks = pit_clocks(); /* status and count of the same moment */
+			if (!(value & 0x10)) {
+				pit_status = (uint8_t)(pit_output(clocks) << 7 | pit_access << 4 | pit_mode << 1);
+				pit_status_latched = 1;
+			}
+			if (!(value & 0x20)) {
+				pit_latch = pit_count(clocks);
+				pit_latched = 1;
+				pit_read_low_next = 1;
+			}
+		}
+		else if ((value >> 6) == 0) { /* channel 0 */
 			if (((value >> 4) & 3) == 0) { /* counter latch */
 				pit_latch = pit_count();
 				pit_latched = 1;

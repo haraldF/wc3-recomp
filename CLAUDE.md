@@ -39,8 +39,16 @@ generated and ignored.
   reports (150Dh: drive numbers, A: = 0).
 - It writes into the game folder: test with a scratch copy (`WC3/` copied, `DATA.DAT` and
   `OBJECTS.TRE` linked), passed as `--iso copy/DATA.DAT`.
-- With a joystick present (ours always is unless `WC_JOYSTICK=0`) it shows a text-mode joystick
-  test grid ("Joystick val (x, y)") and waits.
+- With a joystick present (ours is while the host has a controller; `WC_JOYSTICK=1` always, `=0`
+  never) and no `WC3\JOY0.DAT`, it calibrates in text mode: the prompts (centre, top left, bottom
+  right, each + a button, then Esc) go to the terminal between endless "Joystick val (x, y)" lines;
+  any other key skips it. It times the one-shots with the PIT (bc998, channel 0 read-back), so they
+  last emulated time, and the speed limit doesn't sleep during one: before, the stick was always
+  there and a sleep in the middle gave readings like 20829 instead of 48. It reads the PIT with the
+  8254 read-back command (C2h: status, then count; the status' output bit tells the halves of a
+  mode 3 period apart), which pc.cpp ignored: x then read short (437, 182, 54 instead of 692).
+  Scripted calibration: `WC_JOYSTICK=1 WC_KEYS=1500:+j1,1600:-j1,2000:%-100.-100,2500:+j1,2600:-j1,
+  3000:%100.100,3500:+j1,3600:-j1,4000:%0.0,4500:+esc,4506:-esc` (min 29, centre 685, max 1342).
 - No VESA BIOS: "No VESA Driver -- Cannot use SVGA" and it takes `MCGA.DLL` (320x200) instead of
   `VESA480.DLL`; both are LX modules ("386FX", Miles Design 1992/93).
 - Sound: `hmidrv.386` on the CD is a library of HMI SOS drivers, one per card; the game loads the

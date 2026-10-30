@@ -256,12 +256,18 @@ static void gamepad(const SDL_Event *e)
 {
 	if (e->type == SDL_EVENT_GAMEPAD_ADDED) {
 		SDL_Gamepad *g = SDL_OpenGamepad(e->gdevice.which);
-		if (g) fprintf(stderr, "wc: game controller \"%s\" as the joystick\n", SDL_GetGamepadName(g));
+		if (g) {
+			fprintf(stderr, "wc: game controller \"%s\" as the joystick\n", SDL_GetGamepadName(g));
+			pc_joystick_connected(1);
+		}
 		return;
 	}
 	if (e->type == SDL_EVENT_GAMEPAD_REMOVED) {
 		SDL_Gamepad *g = SDL_GetGamepadFromID(e->gdevice.which);
-		if (g) SDL_CloseGamepad(g);
+		if (g) {
+			SDL_CloseGamepad(g);
+			pc_joystick_connected(-1);
+		}
 		pc_joystick(0, 0, 0, 0);
 		return;
 	}
@@ -318,6 +324,7 @@ static void joystick(const SDL_Event *e)
 			fprintf(stderr, "wc: joystick \"%s\" (%d axes", SDL_GetJoystickName(j), SDL_GetNumJoystickAxes(j));
 			if (roll_axis >= 0 && roll_axis < SDL_GetNumJoystickAxes(j)) fprintf(stderr, ", axis %d rolls", roll_axis);
 			fprintf(stderr, ")\n");
+			pc_joystick_connected(1);
 		}
 		roll_centred = false;
 		return;
@@ -326,6 +333,7 @@ static void joystick(const SDL_Event *e)
 	if (!j) return;
 	if (e->type == SDL_EVENT_JOYSTICK_REMOVED) {
 		SDL_CloseJoystick(j);
+		pc_joystick_connected(-1);
 		/* let go of what the hat held */
 		if (hat & SDL_HAT_UP) pc_key(0x0d | 0x80);
 		if (hat & SDL_HAT_DOWN) pc_key(0x0c | 0x80);

@@ -61,6 +61,11 @@ EMSCRIPTEN_KEEPALIVE void web_mouse_move(int dx, int dy, int buttons)
 
 EMSCRIPTEN_KEEPALIVE void web_joystick(int x, int y, int roll, int buttons)
 {
+	static bool seen; /* the page calls this once it has a gamepad */
+	if (!seen) {
+		seen = true;
+		pc_joystick_connected(1);
+	}
 	pc_joystick(x, y, roll, buttons);
 }
 

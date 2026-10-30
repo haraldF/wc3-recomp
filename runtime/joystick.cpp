@@ -1,14 +1,11 @@
-/* The game port (201h) with joystick A, fed from the host's game controller. On a PC, writing the
- * port starts four one-shots whose time depends on each axis' resistance; a bit reads 1 until its
- * one-shot ends. Wing Commander measures an axis by counting how many of N reads find its bit
- * still 1 (FUN_198a_007c), finds N itself at startup by raising it until the centred stick fits
- * (FUN_1943_0003), and takes the centre from there. So here an axis bit stays 1 for a number of
- * reads, not a time: the centre is CENTRE reads, full deflection RANGE more or fewer, whatever the
- * CPU speed. Joystick B is absent (its bits never fall), the buttons read 0 while pressed.
- * The stick is always there, centred and still unless a controller moves it: the game only acts on
- * a stick that is off centre or a button that changes, and it detects the stick once, at startup,
- * so a controller plugged in later works too. WC_JOYSTICK=0: no joystick.
- * (All this is how Wing Commander I reads it; Wing Commander III's reading is not looked at yet.) */
+/* The game port (201h) with joystick A, fed from the host's game controller. Writing the port
+ * starts four one-shots whose time depends on each axis' resistance; a bit reads 1 until its
+ * one-shot ends. Wing Commander III times them with the PIT (bc998: read-back of channel 0), so the
+ * one-shots last emulated time, like a PC's: about 24 us to 1.1 ms, 0.57 ms centred. The CPU speed
+ * limit doesn't sleep while one runs (pc.cpp), or a pause would show up as a huge reading. Joystick
+ * B is absent (its bits never fall), the buttons read 0 while pressed.
+ * There is a joystick only while the host has a controller (WC_JOYSTICK=1: always, =0: never):
+ * with one, the game calibrates it when WC3\JOY0.DAT is missing (a text-mode screen). */
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
@@ -16,11 +13,14 @@
 #include "host.h"
 #include "wc_rt.h"
 
-enum { CENTRE = 256, RANGE = 240 };
+uint64_t pc_now_ns(void);
+
+enum { CENTRE_NS = 574000, RANGE_NS = 550000 };
 
 static std::atomic<int> stick_x, stick_y, stick_roll, stick_buttons; /* -1000..1000, bit 0/1: buttons 1/2 */
-static int present = -1;
-static int reads, left_x, left_y; /* reads since the last write; one-shot lengths in reads */
+static std::atomic<int> connected; /* controllers the host has */
+static int forced = -2;            /* WC_JOYSTICK: 0 never, 1 always, -1 with a controller; -2 unread */
+static uint64_t end_x, end_y;      /* when the one-shots end */
 
 static int clamp(int v)
 {
@@ -35,29 +35,40 @@ void pc_joystick(int x, int y, int roll, int buttons)
 	stick_buttons.store(buttons);
 }
 
+void pc_joystick_connected(int change)
+{
+	connected += change;
+}
+
 static int is_present(void)
 {
-	if (present < 0) {
+	if (forced == -2) {
 		const char *e = getenv("WC_JOYSTICK");
-		present = !(e && !strcmp(e, "0"));
+		forced = e && *e ? atoi(e) != 0 : -1;
 	}
-	return present;
+	return forced >= 0 ? forced : connected.load() > 0;
 }
 
 void joystick_out(void)
 {
-	reads = 0;
-	left_x = CENTRE + stick_x.load() * RANGE / 1000;
-	left_y = CENTRE + stick_y.load() * RANGE / 1000;
+	uint64_t now = pc_now_ns();
+	end_x = now + CENTRE_NS + (int64_t)stick_x.load() * RANGE_NS / 1000;
+	end_y = now + CENTRE_NS + (int64_t)stick_y.load() * RANGE_NS / 1000;
+}
+
+/* A one-shot is running: the speed limit mustn't pause now. */
+int joystick_busy(void)
+{
+	return end_x | end_y ? pc_now_ns() < (end_x > end_y ? end_x : end_y) : 0;
 }
 
 uint8_t joystick_in(void)
 {
 	if (!is_present()) return 0xff; /* axes never time out, buttons up */
 	uint8_t v = 0xfc; /* joystick B's axes and buttons: absent */
-	if (reads < left_x) v |= 1;
-	if (reads < left_y) v |= 2;
-	if (reads < 0x7fff) reads++;
+	uint64_t now = pc_now_ns();
+	if (now < end_x) v |= 1;
+	if (now < end_y) v |= 2;
 	int b = stick_buttons.load();
 	if (b & 1) v &= (uint8_t)~0x10;
 	if (b & 2) v &= (uint8_t)~0x20;
