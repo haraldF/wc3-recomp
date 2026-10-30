@@ -1,13 +1,13 @@
 /* Wing Commander III: a Phar Lap 386|DOS-Extender flat-model program. The runtime is
  * its DOS extender: it loads the P3 image, gives it Phar Lap's selectors and answers the extender's
  * calls (INT 21h AX=25xxh, its segment memory calls 48h/49h/4Ah, DPMI INT 31h); other DOS calls go
- * to dos.c with protected-mode pointers, and interrupts reach the program's protected-mode handlers.
+ * to dos.cpp with protected-mode pointers, and interrupts reach the program's protected-mode handlers.
  * The first MB is real-mode memory as on a PC (PSP, environment, BIOS data, video); the
  * program's code and data selectors start at PROGRAM_BASE, other memory is handed out above. */
-#include <math.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 #include "host.h"
 #include "wc_rt.h"
@@ -204,7 +204,7 @@ int pm_hooked(uint8_t n)
 	return pm_vec[n].sel != 0;
 }
 
-/* A hardware interrupt (pc.c): to the program's handler if it has one (returns 1). */
+/* A hardware interrupt (pc.cpp): to the program's handler if it has one (returns 1). */
 int pm_interrupt(uint8_t n, uint32_t ret)
 {
 	if (!pm_vec[n].sel) return 0;
@@ -249,7 +249,7 @@ void flat32_int(uint64_t n, uint32_t at, uint32_t next)
 
 /* ---- Phar Lap's system calls (INT 21h AX=25xxh) and segment memory ---- */
 
-static _Noreturn void unknown(const char *what, unsigned fn, uint32_t at)
+[[noreturn]] static void unknown(const char *what, unsigned fn, uint32_t at)
 {
 	fflush(stdout);
 	fprintf(stderr, "wc: unimplemented %s %04x at %05x\n", what, fn, at);

@@ -1,27 +1,27 @@
 /* The mouse driver (INT 33h), fed from the host's window. Positions are in the driver's virtual
  * screen, which in mode 13h is 640x200 (x doubled), like Microsoft's driver. */
-#include <stdatomic.h>
-#include <stdio.h>
+#include <atomic>
+#include <cstdio>
 
 #include "host.h"
 #include "wc_rt.h"
 
 /* Events from the host, on its thread: a single-producer, single-consumer ring. */
 static struct { int16_t x, y; uint8_t buttons, relative; } events[256];
-static _Atomic uint32_t events_head, events_tail;
-static _Atomic int mouse_seen; /* the host had a mouse event: the driver reports a mouse */
+static std::atomic<uint32_t> events_head, events_tail;
+static std::atomic<int> mouse_seen; /* the host had a mouse event: the driver reports a mouse */
 
 static void post(int x, int y, int buttons, int relative)
 {
-	uint32_t tail = atomic_load_explicit(&events_tail, memory_order_relaxed);
-	if (tail - atomic_load_explicit(&events_head, memory_order_acquire) < 256) {
+	uint32_t tail = events_tail.load(std::memory_order_relaxed);
+	if (tail - events_head.load(std::memory_order_acquire) < 256) {
 		events[tail % 256].x = (int16_t)x;
 		events[tail % 256].y = (int16_t)y;
 		events[tail % 256].buttons = (uint8_t)buttons;
 		events[tail % 256].relative = (uint8_t)relative;
-		atomic_store_explicit(&events_tail, tail + 1, memory_order_release);
+		events_tail.store(tail + 1, std::memory_order_release);
 	}
-	atomic_store(&mouse_seen, 1);
+	mouse_seen.store(1);
 }
 
 void pc_warp_end(void);
@@ -61,8 +61,8 @@ static int clamp(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; 
 /* Apply the host's events (called before every INT 33h service). */
 static void drain(void)
 {
-	uint32_t head = atomic_load_explicit(&events_head, memory_order_relaxed);
-	while (head != atomic_load_explicit(&events_tail, memory_order_acquire)) {
+	uint32_t head = events_head.load(std::memory_order_relaxed);
+	while (head != events_tail.load(std::memory_order_acquire)) {
 		int ex = events[head % 256].x, ey = events[head % 256].y;
 		int nx = events[head % 256].relative ? x + ex * 2 : ex * 2, ny = events[head % 256].relative ? y + ey : ey;
 		nx = clamp(nx, min_x, max_x);
@@ -92,7 +92,7 @@ static void drain(void)
 		}
 		buttons = nb;
 	}
-	atomic_store_explicit(&events_head, head, memory_order_release);
+	events_head.store(head, std::memory_order_release);
 }
 
 void mouse_int(uint32_t at)
@@ -106,7 +106,7 @@ void mouse_int(uint32_t at)
 	switch (ax) {
 	case 0x00: /* reset: installed with 2 buttons (if the host has a mouse) */
 	case 0x21:
-		if (!atomic_load(&mouse_seen) && !host_has_mouse()) {
+		if (!mouse_seen.load() && !host_has_mouse()) {
 			wr(R_AX, 2, 0);
 			break;
 		}

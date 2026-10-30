@@ -1,9 +1,9 @@
 /* Where the sound goes: the host's output and, with WC_WAV=file, a WAV recording (also headless).
- * One device makes the sound at a time: the AdLib (opl.c) or the MT-32 (mt32.c); the Sound Blaster's
- * digital sound (sb.c) is mixed into it. */
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+ * One device makes the sound at a time: the AdLib (opl.cpp) or the MT-32 (mt32.cpp); the Sound Blaster's
+ * digital sound (sb.cpp) is mixed into it. */
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 #include "host.h"
 

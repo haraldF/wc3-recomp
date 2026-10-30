@@ -1,13 +1,13 @@
 /* The host platform around the emulated PC: a window with the VGA picture and the keyboard
- * (host_sdl.c; host_web.c in the browser). The emulation never includes SDL; it runs on a thread of its own while the host
+ * (host_sdl.cpp; host_web.cpp in the browser). The emulation never includes SDL; it runs on a thread of its own while the host
  * owns the main thread, which macOS needs for windows (and Emscripten for the canvas). */
 #pragma once
-#include <stdint.h>
+#include <cstdint>
 
 /* Open the window, unless WC_HEADLESS is set or there is no display. Returns 0 when headless. */
 int host_open(void);
 /* Run game on a thread of its own and serve the window until the program exits. */
-_Noreturn void host_run(void (*game)(void));
+[[noreturn]] void host_run(void (*game)(void));
 
 /* Provided by the emulation, called on the host's thread. */
 /* The newest complete frame: mode 13h pixels and the 6-bit palette, taken at vertical retrace.
@@ -33,7 +33,7 @@ void pc_joystick(int x, int y, int roll, int buttons);
 uint8_t pc_stick_key(unsigned button); /* the key a flight stick's button (from 0) presses, 0: none */
 /* Provided by the host: the program ends with this code (DOS exit, or an error), on the emulation's
  * thread. */
-_Noreturn void host_exit(int code);
+[[noreturn]] void host_exit(int code);
 /* Provided by the host: whether there is a mouse (a window, or WC_MOUSE=1 for tests). */
 int host_has_mouse(void);
 /* A file in the game folder was written (on closing it) or deleted: the web host keeps such files

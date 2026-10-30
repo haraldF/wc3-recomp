@@ -1,6 +1,6 @@
-/* The game's CD image (iso.c), read-only. */
+/* The game's CD image (iso.cpp), read-only. */
 #pragma once
-#include <stdint.h>
+#include <cstdint>
 
 struct iso_entry {
 	uint64_t offset; /* of its data in the image */

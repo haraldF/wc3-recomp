@@ -6,14 +6,16 @@
 cmake_minimum_required(VERSION 3.24)
 project(wc3 LANGUAGES C CXX)
 
-set(CMAKE_C_STANDARD 11)
-set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_C_STANDARD 11) # Nuked-OPL3
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
-set(WC_RECOMP_DIR "${CMAKE_SOURCE_DIR}/out/recomp" CACHE PATH "The generated C (npm run recomp)")
+set(WC_RECOMP_DIR "${CMAKE_SOURCE_DIR}/out/recomp" CACHE PATH "The generated C++ (npm run recomp)")
 set(WC_BIN_DIR "${CMAKE_SOURCE_DIR}/out/bin" CACHE PATH "Where wc3 goes, next to image.bin")
 
 if(EMSCRIPTEN)
@@ -37,16 +39,16 @@ add_subdirectory(third_party/munt/mt32emu EXCLUDE_FROM_ALL)
 
 # The recompiled program. The generated code has unused labels and variables by
 # design; -O1 keeps its huge functions quick to compile.
-file(GLOB WC_GENERATED CONFIGURE_DEPENDS "${WC_RECOMP_DIR}/*.c")
+file(GLOB WC_GENERATED CONFIGURE_DEPENDS "${WC_RECOMP_DIR}/*.cpp")
 if(NOT WC_GENERATED)
-  message(FATAL_ERROR "no generated C in ${WC_RECOMP_DIR}: run npm run recomp first")
+  message(FATAL_ERROR "no generated C++ in ${WC_RECOMP_DIR}: run npm run recomp first")
 endif()
 add_library(wc_generated OBJECT ${WC_GENERATED})
 target_include_directories(wc_generated PRIVATE runtime "${WC_RECOMP_DIR}")
 target_compile_options(wc_generated PRIVATE -w -O1)
 
-file(GLOB WC_RUNTIME CONFIGURE_DEPENDS runtime/*.c)
-list(FILTER WC_RUNTIME EXCLUDE REGEX "/host_(sdl|web)\\.c$")
+file(GLOB WC_RUNTIME CONFIGURE_DEPENDS runtime/*.cpp)
+list(FILTER WC_RUNTIME EXCLUDE REGEX "/host_(sdl|web)\\.cpp$")
 add_executable(wc ${WC_RUNTIME} $<TARGET_OBJECTS:wc_generated>)
 target_include_directories(wc PRIVATE runtime "${WC_RECOMP_DIR}")
 target_compile_options(wc PRIVATE -Wall -Wextra -Wno-unused-parameter)
@@ -54,7 +56,7 @@ target_link_libraries(wc PRIVATE opl3 MT32Emu::mt32emu)
 set_target_properties(wc PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${WC_BIN_DIR}")
 
 if(EMSCRIPTEN)
-  target_sources(wc PRIVATE runtime/host_web.c)
+  target_sources(wc PRIVATE runtime/host_web.cpp)
   set(WC_IMAGE "${WC_RECOMP_DIR}/image.bin")
   target_link_options(wc PRIVATE -pthread -O1
     -sPTHREAD_POOL_SIZE=1 -sINITIAL_MEMORY=128MB -sEXIT_RUNTIME=1
@@ -72,7 +74,7 @@ if(EMSCRIPTEN)
   endforeach()
   add_custom_target(wc_page ALL DEPENDS ${WC_DATA})
 else()
-  target_sources(wc PRIVATE runtime/host_sdl.c)
+  target_sources(wc PRIVATE runtime/host_sdl.cpp)
   target_link_libraries(wc PRIVATE SDL3::SDL3)
   set_target_properties(wc PROPERTIES OUTPUT_NAME wc3)
   # The program image the runtime loads, found next to the executable

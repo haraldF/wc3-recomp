@@ -1,17 +1,17 @@
 /* Software interrupts: a small DOS (INT 21h) on top of the host file system, plus BIOS stubs.
- * Drive C: is the game folder, D: the game's CD (iso.c, read-only, and MSCDEX on INT 2Fh); the
+ * Drive C: is the game folder, D: the game's CD (iso.cpp, read-only, and MSCDEX on INT 2Fh); the
  * program starts on D:, as GOG's DOSBox starts it. Anything not implemented stops the program with
  * the function number, so the next piece of work is obvious. */
-#include <ctype.h>
+#include <cctype>
 #include <dirent.h>
-#include <errno.h>
+#include <cerrno>
 #include <fcntl.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <strings.h>
 #include <sys/stat.h>
-#include <time.h>
+#include <ctime>
 #include <unistd.h>
 
 #include "host.h"
@@ -62,7 +62,7 @@ static void ok(void)
 	set_cf(0);
 }
 
-/* flat32: the program calls DOS in protected mode (flat32.c), where pointers are a selector and a
+/* flat32: the program calls DOS in protected mode (flat32.cpp), where pointers are a selector and a
  * 32-bit offset (DS:EDX), counts and results 32 bits (ECX, EAX) */
 int dos_pm;
 
@@ -848,7 +848,7 @@ void dos_int(uint64_t n, uint32_t at)
 	case 0x12: /* conventional memory in KB */
 		wr(R_AX, 2, 640);
 		return;
-	case 0x15: /* system services: the configuration (pc.c), the keyboard intercept (the key goes on) */
+	case 0x15: /* system services: the configuration (pc.cpp), the keyboard intercept (the key goes on) */
 		if (AH == 0xc0) {
 			wr(R_ES, 2, 0xf000);
 			wr(R_BX, 2, 0xe6f5);

@@ -1,4 +1,4 @@
-// Statically recompiles WC3.EXE's flat 32-bit image to C: every instruction's p-code becomes C
+// Statically recompiles WC3.EXE's flat 32-bit image to C++: every instruction's p-code becomes C++
 // operating on an emulated x86 state (runtime/wc_rt.h): R[] holds Ghidra's register space, M[] the
 // memory. The image is imported at its offset in the flat segment, so code addresses are the
 // program's offsets.
@@ -9,7 +9,7 @@
 //  - Ghidra ignores segments in 32-bit code: memory accesses add the base of their segment's
 //    selector (wc_sb[]), segment register loads go through seg_load().
 //  - x87 values are carried as doubles (x87_* in wc_rt.h).
-// Writes <out>/seg_*.c (16 KB of code each), <out>/wc_dispatch.c, <out>/wc_gen.h and <out>/image.bin.
+// Writes <out>/seg_*.cpp (16 KB of code each), <out>/wc_dispatch.cpp, <out>/wc_gen.h and <out>/image.bin.
 // Code reached only through pointers in data has no Ghidra function; list such entry points (hex,
 // one per line) in the entries file and they get recompiled too, along with any functions they
 // call. The runtime reports such addresses ("npm run discover").
@@ -118,7 +118,7 @@ public class WcRecomp extends GhidraScript {
 			writeIfChanged(out.resolve(e.getKey()), withPrototypes(e.getValue().toString()));
 		}
 		// The build compiles every file here: remove those that no longer have code.
-		try (var old = Files.newDirectoryStream(out, "seg_*.c")) {
+		try (var old = Files.newDirectoryStream(out, "seg_*.cpp*")) {
 			for (Path p : old) {
 				if (!files.containsKey(p.getFileName().toString())) {
 					Files.delete(p);
@@ -138,7 +138,7 @@ public class WcRecomp extends GhidraScript {
 
 	/** 16 KB of code per file, so the build can work in parallel */
 	private static StringBuilder fileFor(long entry, Map<String, StringBuilder> files) {
-		return files.computeIfAbsent(String.format("seg_%05x.c", entry & ~0x3fffL), k -> new StringBuilder());
+		return files.computeIfAbsent(String.format("seg_%05x.cpp", entry & ~0x3fffL), k -> new StringBuilder());
 	}
 
 	/** Unchanged files keep their timestamps, so the C build only recompiles what changed. */
@@ -621,6 +621,6 @@ public class WcRecomp extends GhidraScript {
 			d.append(fn).append(",\n");
 		}
 		d.append("};\nconst uint32_t wc_program_size = 0x").append(Long.toHexString(programSize)).append(";\n");
-		writeIfChanged(out.resolve("wc_dispatch.c"), d.toString());
+		writeIfChanged(out.resolve("wc_dispatch.cpp"), d.toString());
 	}
 }

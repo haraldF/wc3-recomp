@@ -1,11 +1,11 @@
 /* The game's CD: an ISO 9660 image (GOG's DATA.DAT, a single data track of 2048-byte sectors),
- * read-only, for drive D: in dos.c. WC_CD=file names another image; by default it is DATA.DAT in
+ * read-only, for drive D: in dos.cpp. WC_CD=file names another image; by default it is DATA.DAT in
  * the game folder. Only the primary volume descriptor's names (8.3, ";1" versions dropped). */
-#include <ctype.h>
+#include <cctype>
 #include <fcntl.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <strings.h>
 #include <unistd.h>
 

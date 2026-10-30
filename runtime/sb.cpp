@@ -2,12 +2,12 @@
  * controller (8-bit channels 0-3, ports 00h-0Fh and the page registers). Only what the original
  * Sound Blaster does: reset (2x6h, then AAh at 2xAh), 8-bit mono output in single-cycle (14h),
  * auto-initialize (1Ch) and direct (10h) mode at the rate of a time constant (40h), speaker, pause,
- * version. A block plays in emulated time, its end raises the IRQ, and sound.c mixes the samples
+ * version. A block plays in emulated time, its end raises the IRQ, and sound.cpp mixes the samples
  * into whatever has the output (AdLib or MT-32), by time: sb_mix. WC_SB=0 removes the card.
- * The FM chip of the card is the AdLib's (opl.c). */
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+ * The FM chip of the card is the AdLib's (opl.cpp). */
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 #include "wc_rt.h"
 

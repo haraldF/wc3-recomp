@@ -2,7 +2,7 @@
 //   --iso        the CD image holding WC3.EXE (default ../game3/DATA.DAT, GOG's)
 //   unpack       WC3.EXE from the CD image, its P3 load image to out/image.bin, its start to out/p3.json
 //   decompile    unpack, import into a Ghidra project (out/ghidra) and analyze
-//   recomp       translate the analyzed program to compilable C (out/recomp/) and build out/bin/wc3
+//   recomp       translate the analyzed program to C++ (out/recomp/) and build out/bin/wc3
 //   build        only (re)build out/bin/wc3 from out/recomp/ and runtime/ (CMake, in out/build/)
 //   web          build the web page in out/web/ from out/recomp/ and runtime/ (Emscripten, in out/build-web/)
 //   discover     run out/bin/wc3 (each run for --seconds, default 60; WC_KEYS etc. from the environment);
@@ -74,7 +74,7 @@ const cmakeBuild = async (web: boolean): Promise<void> => {
 };
 const doBuild = (): Promise<void> => cmakeBuild(false);
 
-/** wc_program.c: what the runtime needs from the program's P3 header and name. */
+/** wc_program.cpp: what the runtime needs from the program's P3 header and name. */
 function writeProgram(): void {
   const h = (n: number): string => `0x${n.toString(16).padStart(4, "0")}`;
   const p = JSON.parse(readFileSync(p3Path, "utf8")) as { base: number; eip: number; esp: number; size: number; minExtra: number };
@@ -84,7 +84,7 @@ function writeProgram(): void {
     `const struct wc_program wc_program = { "${EXE}", ${CYCLES}, ${h(p.base)}, ${h(p.eip)}, ${h(p.esp)}, ${h(p.size + p.minExtra)} };`,
     "",
   ].join("\n");
-  const file = path.join(recompDir, "wc_program.c");
+  const file = path.join(recompDir, "wc_program.cpp");
   if (!existsSync(file) || readFileSync(file, "utf8") !== text) writeFileSync(file, text);
 }
 

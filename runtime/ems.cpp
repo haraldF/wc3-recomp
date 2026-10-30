@@ -5,9 +5,10 @@
  * The page frame (4 pages of 16 KB at E000:0000) is ordinary emulated memory; mapping a page
  * copies the page that was there back to its store and the new one in. The game finds the
  * driver by its name at offset 0Ah of INT 67h's segment (F000, the BIOS entries). */
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include <vector>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 #include "wc_rt.h"
 
@@ -20,7 +21,7 @@ enum {
 	NONE = 0xffff,
 };
 
-static uint8_t *store;             /* PAGES pages */
+static std::vector<uint8_t> store; /* PAGES pages */
 static uint8_t page_used[PAGES];
 static struct {
 	int open;
@@ -33,7 +34,7 @@ static uint16_t mapped[PHYS] = { NONE, NONE, NONE, NONE }; /* physical page -> s
 
 int ems_enabled(void)
 {
-	return store != NULL;
+	return !store.empty();
 }
 
 void ems_init(void)
@@ -42,10 +43,7 @@ void ems_init(void)
 	if (e && !strcmp(e, "0")) {
 		return;
 	}
-	store = calloc(PAGES, PAGE);
-	if (!store) {
-		return;
-	}
+	store.assign((size_t)PAGES * PAGE, 0);
 	memcpy(M + 0xf000a, "EMMXXXX0", 8);
 	handle[0].open = 1; /* handle 0: the operating system's, no pages */
 }
@@ -58,16 +56,16 @@ static void map(int p, uint16_t s)
 	}
 	uint8_t *frame = M + FRAME + p * PAGE;
 	if (mapped[p] != NONE) {
-		memcpy(store + (size_t)mapped[p] * PAGE, frame, PAGE);
+		memcpy(store.data() + (size_t)mapped[p] * PAGE, frame, PAGE);
 	}
 	/* the same page in another physical page: take its current contents from there */
 	for (int q = 0; q < PHYS; q++) {
 		if (q != p && s != NONE && mapped[q] == s) {
-			memcpy(store + (size_t)s * PAGE, M + FRAME + q * PAGE, PAGE);
+			memcpy(store.data() + (size_t)s * PAGE, M + FRAME + q * PAGE, PAGE);
 		}
 	}
 	if (s != NONE) {
-		memcpy(frame, store + (size_t)s * PAGE, PAGE);
+		memcpy(frame, store.data() + (size_t)s * PAGE, PAGE);
 	}
 	mapped[p] = s;
 }
@@ -99,7 +97,7 @@ static int resize(uint16_t h, uint16_t n)
 	for (int s = 0; handle[h].count < n; s++) {
 		if (!page_used[s]) {
 			page_used[s] = 1;
-			memset(store + (size_t)s * PAGE, 0, PAGE);
+			memset(store.data() + (size_t)s * PAGE, 0, PAGE);
 			handle[h].page[handle[h].count++] = (uint16_t)s;
 		}
 	}
@@ -115,7 +113,7 @@ void ems_int(uint32_t at)
 {
 	uint16_t dx = (uint16_t)rd(R_DX, 2), bx = (uint16_t)rd(R_BX, 2);
 	uint8_t ah = (uint8_t)rd(R_AH, 1), al = (uint8_t)rd(R_AL, 1);
-	if (!store) {
+	if (store.empty()) {
 		result(0x80);
 		return;
 	}

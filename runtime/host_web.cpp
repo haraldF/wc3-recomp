@@ -4,9 +4,9 @@
  * pthread (a Web Worker sharing the memory); the main thread returns to the browser. */
 #include <emscripten.h>
 #include <pthread.h>
-#include <stdatomic.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <unistd.h>
 
 #include "host.h"
@@ -94,7 +94,7 @@ static int16_t audio_ring[AUDIO_FRAMES * 2];
  * read (the worklet advances it), sample rate (0 until the sound starts). */
 static struct {
 	uint32_t ring, frames;
-	_Atomic uint32_t written, read, rate;
+	std::atomic<uint32_t> written, read, rate;
 } audio_info;
 
 EMSCRIPTEN_KEEPALIVE void *web_audio_info(void)
@@ -107,7 +107,7 @@ EMSCRIPTEN_KEEPALIVE void *web_audio_info(void)
 int host_audio_open(unsigned rate)
 {
 	web_audio_info();
-	atomic_store(&audio_info.rate, rate);
+	audio_info.rate.store(rate);
 	return 1;
 }
 
@@ -115,13 +115,13 @@ int host_audio_open(unsigned rate)
  * newest samples are dropped; the worklet skips ahead when it falls behind. */
 void host_audio(const int16_t *frames, unsigned count)
 {
-	uint32_t w = atomic_load_explicit(&audio_info.written, memory_order_relaxed);
-	uint32_t r = atomic_load_explicit(&audio_info.read, memory_order_acquire);
+	uint32_t w = audio_info.written.load(std::memory_order_relaxed);
+	uint32_t r = audio_info.read.load(std::memory_order_acquire);
 	for (unsigned i = 0; i < count && w - r < AUDIO_FRAMES; i++, w++) {
 		audio_ring[(w % AUDIO_FRAMES) * 2] = frames[i * 2];
 		audio_ring[(w % AUDIO_FRAMES) * 2 + 1] = frames[i * 2 + 1];
 	}
-	atomic_store_explicit(&audio_info.written, w, memory_order_release);
+	audio_info.written.store(w, std::memory_order_release);
 }
 
 /* ---- files: what the game writes goes to the page, which keeps it in IndexedDB ---- */
@@ -135,7 +135,7 @@ void host_file_saved(const char *path)
 
 /* The game exited (to DOS, or with an error). exit() wouldn't end the program, since the runtime is
  * kept alive (host_run), nor tell the page: so end this thread and tell the page itself. */
-_Noreturn void host_exit(int code)
+[[noreturn]] void host_exit(int code)
 {
 	fflush(stdout);
 	fflush(stderr);
@@ -150,7 +150,7 @@ static void *game_thread(void *arg)
 	host_exit(0);
 }
 
-_Noreturn void host_run(void (*game)(void))
+[[noreturn]] void host_run(void (*game)(void))
 {
 	pthread_attr_t attr;
 	pthread_attr_init(&attr);

@@ -1,11 +1,11 @@
 /* The host with SDL3: a window showing the VGA picture at 4:3, the keyboard as PC scancodes, the
- * mouse for the mouse driver (mouse.c), a game controller as the joystick (joystick.c).
+ * mouse for the mouse driver (mouse.cpp), a game controller as the joystick (joystick.cpp).
  * Cmd+F toggles full screen, Cmd+Up/Down change the speed (in flight the frame rate, elsewhere the
  * instruction rate), Cmd+Left/Right the mouse's speed in full screen (all shown in the title), Cmd+Q or closing the window quits. WC_HEADLESS=1: no
  * window. */
 #include <pthread.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <cstdio>
+#include <cstdlib>
 
 #include <SDL3/SDL.h>
 
@@ -389,7 +389,7 @@ void host_audio(const int16_t *frames, unsigned count)
 	SDL_PutAudioStreamData(audio, frames, (int)count * 4);
 }
 
-_Noreturn void host_exit(int code)
+[[noreturn]] void host_exit(int code)
 {
 	exit(code);
 }
@@ -408,7 +408,7 @@ static void *game_thread(void *arg)
 	host_exit(0);
 }
 
-_Noreturn void host_run(void (*game)(void))
+[[noreturn]] void host_run(void (*game)(void))
 {
 	/* the recompiled code nests C calls as deeply as the game nests calls and interrupts */
 	pthread_attr_t attr;

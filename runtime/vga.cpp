@@ -1,7 +1,7 @@
 /* VGA: the DAC (palette), the status register's blanking and retrace bits in real time, and the
  * frames the host shows, copied from the mode 13h frame buffer at each vertical retrace. */
 #include <pthread.h>
-#include <stdio.h>
+#include <cstdio>
 
 #include "host.h"
 #include "wc_rt.h"

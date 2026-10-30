@@ -1,14 +1,15 @@
 /* Roland MT-32: an MPU-401 at ports 330h (data) and 331h (status, commands) in UART mode, whose
  * MIDI goes to munt's libmt32emu (third_party/munt, LGPL 2.1+). WC_MT32=folder turns it on with the
- * ROM images found there (and in its subfolders); main.c then also tells the game to use it ("r").
+ * ROM images found there (and in its subfolders); main.cpp then also tells the game to use it ("r").
  * WC_MT32_MACHINE picks the model (munt's names: mt32_1_07, cm32l_1_02, ...), else the first one
- * the folder has ROMs for, in the order below. Samples are made like the AdLib's (opl.c). */
+ * the folder has ROMs for, in the order below. Samples are made like the AdLib's (opl.cpp). */
 #include <dirent.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <sys/stat.h>
 
+#define MT32EMU_API_TYPE 1 /* munt's C interface */
 #include "mt32emu.h"
 #include "wc_rt.h"
 

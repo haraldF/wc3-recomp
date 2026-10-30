@@ -1,7 +1,7 @@
 # wc3-recomp
 
 Statically recompiles Wing Commander III: Heart of the Tiger (`WC3.EXE`, a 32-bit DOS program for
-the Phar Lap 386|DOS-Extender) to C with Ghidra, driven from TypeScript, and builds it into a
+the Phar Lap 386|DOS-Extender) to C++ with Ghidra, driven from TypeScript, and builds it into a
 native macOS program with an emulated PC around it.
 
 Work in progress: the startup runs (~2 million instructions, text-mode loading messages, the
@@ -40,10 +40,10 @@ npm run discover     # run it; code reached only through pointers is added to en
 - `src/p3.ts` reads `WC3.EXE` from the ISO 9660 image and unpacks its P3 load image (Phar Lap's
   run-length packing) to `out/image.bin`; Ghidra imports it as 32-bit x86 at its offset in the
   flat segment.
-- `ghidra_scripts/WcRecomp.java` turns every instruction's p-code into C on an emulated CPU (one C
+- `ghidra_scripts/WcRecomp.java` turns every instruction's p-code into C++ on an emulated CPU (one
   function per Ghidra function, entered at any instruction through a switch). Memory accesses add
   the base of their segment register's selector; x87 values are carried as doubles.
-- `runtime/flat32.c` is the DOS extender: Phar Lap's selectors, its INT 21h AX=25xxh calls and
+- `runtime/flat32.cpp` is the DOS extender: Phar Lap's selectors, its INT 21h AX=25xxh calls and
   segment memory, DPMI, protected-mode interrupts. The rest of `runtime/` is the PC.
 
 ## License

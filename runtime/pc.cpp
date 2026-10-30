@@ -2,12 +2,12 @@
  * the keyboard controller and the ROM BIOS (handled here natively, for interrupts the program has
  * no protected-mode handler for). */
 #include <fcntl.h>
-#include <stdatomic.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <termios.h>
-#include <time.h>
+#include <ctime>
 #include <unistd.h>
 
 #include "host.h"
@@ -84,7 +84,7 @@ static void interrupt(uint8_t vec, uint32_t ret)
  * warping. */
 enum { WARP = 20 };
 static uint64_t warp_start_ns;
-static _Atomic uint64_t warp_end_ns = 1; /* 0: warping; set when it ends (1: never started) */
+static std::atomic<uint64_t> warp_end_ns = 1; /* 0: warping; set when it ends (1: never started) */
 
 static uint64_t real_ns(void)
 {
@@ -103,20 +103,20 @@ static uint64_t clock_rate, clock_skip_ns; /* instructions per ms; time skipped 
 uint64_t pc_now_ns(void)
 {
 	if (clock_instructions) return wc_icount * 1000000u / clock_rate + clock_skip_ns;
-	uint64_t now = real_ns(), end = atomic_load_explicit(&warp_end_ns, memory_order_acquire);
+	uint64_t now = real_ns(), end = warp_end_ns.load(std::memory_order_acquire);
 	if (end == 1) return now;
 	return now + ((end ? end : now) - warp_start_ns) * (WARP - 1);
 }
 
 int pc_warping(void)
 {
-	return atomic_load_explicit(&warp_end_ns, memory_order_relaxed) == 0;
+	return warp_end_ns.load(std::memory_order_relaxed) == 0;
 }
 
 void pc_warp_end(void)
 {
 	uint64_t zero = 0;
-	atomic_compare_exchange_strong(&warp_end_ns, &zero, real_ns());
+	warp_end_ns.compare_exchange_strong(zero, real_ns());
 }
 
 static void warp_start(void)
@@ -124,7 +124,7 @@ static void warp_start(void)
 	const char *w = getenv("WC_WARP");
 	if ((w && !strcmp(w, "0")) || clock_instructions) return;
 	warp_start_ns = real_ns();
-	atomic_store(&warp_end_ns, 0);
+	warp_end_ns.store(0);
 }
 
 static uint32_t pit_divisor = 65536; /* 18.2 Hz */
@@ -203,7 +203,7 @@ static uint8_t key_named(const char *n)
 /* The keys a flight stick's buttons press, by the numbers printed on them (from 1): 3 Enter
  * (missile), 4 Tab (afterburner); WC_STICK_KEYS=11:tab,4:none changes them. Buttons 1 and 2 are
  * the joystick's own. */
-static uint8_t stick_keys[33] = { [3] = 0x1c, [4] = 0x0f };
+static uint8_t stick_keys[33] = { 0, 0, 0, 0x1c, 0x0f };
 
 static void parse_stick_keys(const char *s)
 {
@@ -330,7 +330,7 @@ static void parse_script(const char *s)
 
 /* Keys from the host's window, on its thread: a single-producer, single-consumer ring. */
 static uint8_t host_keys[256];
-static _Atomic uint32_t host_keys_head, host_keys_tail;
+static std::atomic<uint32_t> host_keys_head, host_keys_tail;
 /* The game samples keys in its menus, so a key released this soon after it went down (a quick tap,
  * a browser's synthetic key press) has its release held back until then. */
 enum { MIN_KEY_NS = 60000000 };
@@ -339,10 +339,10 @@ static uint64_t key_down_ns[128];
 void pc_key(uint8_t scancode)
 {
 	if (!(scancode & 0x80)) pc_warp_end();
-	uint32_t tail = atomic_load_explicit(&host_keys_tail, memory_order_relaxed);
-	if (tail - atomic_load_explicit(&host_keys_head, memory_order_acquire) < sizeof host_keys) {
+	uint32_t tail = host_keys_tail.load(std::memory_order_relaxed);
+	if (tail - host_keys_head.load(std::memory_order_acquire) < sizeof host_keys) {
 		host_keys[tail % sizeof host_keys] = scancode;
-		atomic_store_explicit(&host_keys_tail, tail + 1, memory_order_release);
+		host_keys_tail.store(tail + 1, std::memory_order_release);
 	}
 }
 
@@ -403,8 +403,8 @@ static void poll_keyboard(void)
 		kbd_push(script_held);
 		script_repeat_ns += 92000000u;
 	}
-	uint32_t head = atomic_load_explicit(&host_keys_head, memory_order_relaxed);
-	while (head != atomic_load_explicit(&host_keys_tail, memory_order_acquire)) {
+	uint32_t head = host_keys_head.load(std::memory_order_relaxed);
+	while (head != host_keys_tail.load(std::memory_order_acquire)) {
 		uint8_t code = host_keys[head % sizeof host_keys];
 		uint64_t now = pc_now_ns();
 		if (!(code & 0x80)) key_down_ns[code] = now;
@@ -412,7 +412,7 @@ static void poll_keyboard(void)
 		kbd_push(code);
 		head++;
 	}
-	atomic_store_explicit(&host_keys_head, head, memory_order_release);
+	host_keys_head.store(head, std::memory_order_release);
 	if (kbd_tty) {
 		char c;
 		while (read(0, &c, 1) == 1) {
@@ -453,14 +453,14 @@ static void deliver(uint32_t at);
  * In flight the game draws more or less per frame (enemies close by: more), so a fixed
  * instruction rate gives an uneven frame rate. There it runs at full speed and pc_frame() paces
  * the frames instead (flight_fps, WC_FPS; 0: no frame pacing). */
-static _Atomic uint64_t cycles_per_ms; /* the program's default (wc_program.cycles), set in pc_init */
-static _Atomic uint64_t flight_fps = 15;
+static std::atomic<uint64_t> cycles_per_ms; /* the program's default (wc_program.cycles), set in pc_init */
+static std::atomic<uint64_t> flight_fps = 15;
 static uint64_t throttle_start_ns, throttle_start_icount, throttle_cycles;
 /* Frames are paced while the game copies frames to the screen; between two copies it may use up
  * to 3 frames' worth of instructions at full speed (heavy frames need it). Code that goes on
  * without copying frames (the autopilot sequence) is limited by instructions again at once. */
 static int pacing;
-static _Atomic int pacing_seen; /* pacing, for the host's thread (pc_in_flight) */
+static std::atomic<int> pacing_seen; /* pacing, for the host's thread (pc_in_flight) */
 static uint64_t next_frame_ns, frame_icount;
 
 static uint64_t faster(uint64_t c, int change, uint64_t lo, uint64_t hi)
@@ -472,26 +472,26 @@ static uint64_t faster(uint64_t c, int change, uint64_t lo, uint64_t hi)
 
 uint64_t pc_cycles(int change)
 {
-	uint64_t c = faster(atomic_load(&cycles_per_ms), change, 500, 1000000);
-	atomic_store(&cycles_per_ms, c);
+	uint64_t c = faster(cycles_per_ms.load(), change, 500, 1000000);
+	cycles_per_ms.store(c);
 	return c;
 }
 
 uint64_t pc_flight_fps(int change)
 {
-	uint64_t f = faster(atomic_load(&flight_fps), change, 5, 200);
-	atomic_store(&flight_fps, f);
+	uint64_t f = faster(flight_fps.load(), change, 5, 200);
+	flight_fps.store(f);
 	return f;
 }
 
 int pc_in_flight(void)
 {
-	return atomic_load_explicit(&pacing_seen, memory_order_relaxed);
+	return pacing_seen.load(std::memory_order_relaxed);
 }
 
 static void throttle(void)
 {
-	uint64_t cycles = atomic_load_explicit(&cycles_per_ms, memory_order_relaxed);
+	uint64_t cycles = cycles_per_ms.load(std::memory_order_relaxed);
 	if (!cycles || clock_instructions) return;
 	if (pc_warping()) {
 		throttle_cycles = 0; /* measure afresh once it ends */
@@ -499,14 +499,14 @@ static void throttle(void)
 	}
 	uint64_t now = pc_now_ns();
 	if (pacing) {
-		uint64_t fps = atomic_load_explicit(&flight_fps, memory_order_relaxed);
+		uint64_t fps = flight_fps.load(std::memory_order_relaxed);
 		if (fps && wc_icount - frame_icount < 3 * cycles * 1000 / fps) { /* within the frame budget */
 			throttle_start_ns = now;
 			throttle_start_icount = wc_icount;
 			return;
 		}
 		pacing = 0; /* no frame copy for a while: limit instructions from here */
-		atomic_store_explicit(&pacing_seen, 0, memory_order_relaxed);
+		pacing_seen.store(0, std::memory_order_relaxed);
 		throttle_start_ns = now;
 		throttle_start_icount = wc_icount;
 	}
@@ -538,7 +538,7 @@ void irq_poll(uint32_t at)
 /* A frame is done (in flight): wait for its slot, keeping devices and interrupts going. */
 void pc_frame(uint32_t at)
 {
-	uint64_t fps = atomic_load_explicit(&flight_fps, memory_order_relaxed);
+	uint64_t fps = flight_fps.load(std::memory_order_relaxed);
 	if (!fps) return;
 	uint64_t now = pc_now_ns(), period = 1000000000u / fps;
 	static int stats = -1;
@@ -557,7 +557,7 @@ void pc_frame(uint32_t at)
 	}
 	if (!pacing || now > next_frame_ns + 4 * period) next_frame_ns = now; /* (re)start */
 	pacing = 1;
-	atomic_store_explicit(&pacing_seen, 1, memory_order_relaxed);
+	pacing_seen.store(1, std::memory_order_relaxed);
 	next_frame_ns += period;
 	while ((now = pc_now_ns()) < next_frame_ns) {
 		if (clock_instructions) { /* skip to the frame's slot */
@@ -762,7 +762,7 @@ void bios_key_flush(void)
 
 /* ---- software interrupts and the ROM BIOS ---- */
 
-/* INT n in the program (flat32.c: the extender's calls, the program's handlers, DOS and the BIOS). */
+/* INT n in the program (flat32.cpp: the extender's calls, the program's handlers, DOS and the BIOS). */
 void cpu_int(uint64_t n, uint32_t at, uint32_t next)
 {
 	flat32_int(n, at, next);
@@ -837,11 +837,11 @@ void pc_init(int tty)
 	opl_init();
 	sb_init();
 	ems_init();
-	atomic_store(&cycles_per_ms, wc_program.cycles);
+	cycles_per_ms.store(wc_program.cycles);
 	const char *cycles = getenv("WC_CYCLES");
-	if (cycles) atomic_store(&cycles_per_ms, strcmp(cycles, "max") ? strtoull(cycles, NULL, 10) : 0);
+	if (cycles) cycles_per_ms.store(strcmp(cycles, "max") ? strtoull(cycles, NULL, 10) : 0);
 	const char *fps = getenv("WC_FPS");
-	if (fps) atomic_store(&flight_fps, strtoull(fps, NULL, 10));
+	if (fps) flight_fps.store(strtoull(fps, NULL, 10));
 
 	parse_script(getenv("WC_KEYS"));
 	parse_stick_keys(getenv("WC_STICK_KEYS"));

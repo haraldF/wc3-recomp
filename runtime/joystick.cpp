@@ -9,16 +9,16 @@
  * a stick that is off centre or a button that changes, and it detects the stick once, at startup,
  * so a controller plugged in later works too. WC_JOYSTICK=0: no joystick.
  * (All this is how Wing Commander I reads it; Wing Commander III's reading is not looked at yet.) */
-#include <stdatomic.h>
-#include <stdlib.h>
-#include <string.h>
+#include <atomic>
+#include <cstdlib>
+#include <cstring>
 
 #include "host.h"
 #include "wc_rt.h"
 
 enum { CENTRE = 256, RANGE = 240 };
 
-static _Atomic int stick_x, stick_y, stick_roll, stick_buttons; /* -1000..1000, bit 0/1: buttons 1/2 */
+static std::atomic<int> stick_x, stick_y, stick_roll, stick_buttons; /* -1000..1000, bit 0/1: buttons 1/2 */
 static int present = -1;
 static int reads, left_x, left_y; /* reads since the last write; one-shot lengths in reads */
 
@@ -29,10 +29,10 @@ static int clamp(int v)
 
 void pc_joystick(int x, int y, int roll, int buttons)
 {
-	atomic_store(&stick_x, clamp(x));
-	atomic_store(&stick_y, clamp(y));
-	atomic_store(&stick_roll, clamp(roll));
-	atomic_store(&stick_buttons, buttons);
+	stick_x.store(clamp(x));
+	stick_y.store(clamp(y));
+	stick_roll.store(clamp(roll));
+	stick_buttons.store(buttons);
 }
 
 static int is_present(void)
@@ -47,8 +47,8 @@ static int is_present(void)
 void joystick_out(void)
 {
 	reads = 0;
-	left_x = CENTRE + atomic_load(&stick_x) * RANGE / 1000;
-	left_y = CENTRE + atomic_load(&stick_y) * RANGE / 1000;
+	left_x = CENTRE + stick_x.load() * RANGE / 1000;
+	left_y = CENTRE + stick_y.load() * RANGE / 1000;
 }
 
 uint8_t joystick_in(void)
@@ -58,7 +58,7 @@ uint8_t joystick_in(void)
 	if (reads < left_x) v |= 1;
 	if (reads < left_y) v |= 2;
 	if (reads < 0x7fff) reads++;
-	int b = atomic_load(&stick_buttons);
+	int b = stick_buttons.load();
 	if (b & 1) v &= (uint8_t)~0x10;
 	if (b & 2) v &= (uint8_t)~0x20;
 	return v;

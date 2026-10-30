@@ -1,4 +1,4 @@
-/* Loads the program image, sets up the process the way the DOS extender would (flat32.c), and
+/* Loads the program image, sets up the process the way the DOS extender would (flat32.cpp), and
  * enters the recompiled code at the program's entry point.
  * Usage: wc3 [game folder [game arguments...]]
  *   game arguments  passed to the game on its DOS command line
@@ -25,14 +25,14 @@
  *   WC_STICK_KEYS=b:key,...  keys a flight stick's buttons press (numbered as on the stick; default
  *                   3:enter,4:tab; "none" for none) */
 #include <libgen.h>
-#include <limits.h>
+#include <climits>
 #ifndef __EMSCRIPTEN__
 #include <mach-o/dyld.h>
 #endif
-#include <signal.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include <csignal>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <unistd.h>
 
 #include "host.h"

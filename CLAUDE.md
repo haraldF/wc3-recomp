@@ -6,7 +6,7 @@ pipeline and usage; this file records the facts and pitfalls behind it.
 ## Goal
 
 A native macOS (later WebAssembly) executable of Wing Commander III (`WC3.EXE` on GOG's CD image
-`../game3/DATA.DAT`), made by statically recompiling the DOS program to C. The user doesn't care
+`../game3/DATA.DAT`), made by statically recompiling the DOS program to C++. The user doesn't care
 about naming or understanding the code, only about running it.
 
 Split off from wc-decomp (`../wc-decomp`, Wing Commander I/II, 16-bit real mode), whose runtime
@@ -48,7 +48,7 @@ generated and ignored.
 
 ## Static recompilation (WcRecomp.java + runtime/)
 
-- p-code → C: `R[]` is Ghidra's register space (offsets in `wc_rt.h`), `M[]` 64 MB. One C function
+- p-code → C++: `R[]` is Ghidra's register space (offsets in `wc_rt.h`), `M[]` 64 MB. One C function
   per Ghidra function with an entry `switch` and gotos; code addresses are the program's offsets
   (`run()` = `run_code()`).
 - Ghidra ignores segments in 32-bit code. The generator adds `wc_sb[n]` (the base of ES, CS, SS, DS,
@@ -64,7 +64,7 @@ generated and ignored.
   showed only there.
 - The C library's `int86()` writes `INT n; RET` on the stack and calls it: `run()` recognises those
   bytes and does the interrupt and the return.
-- x87: Ghidra's 10-byte ST registers carry doubles here (x87_* helpers in `wc_rt.h`, `flat32.c`);
+- x87: Ghidra's 10-byte ST registers carry doubles here (x87_* helpers in `wc_rt.h`, `flat32.cpp`);
   PcodeOp names: FLOAT_FLOAT2FLOAT, FLOAT_INT2FLOAT, FLOAT_TRUNC. The helpers are named x87_* since
   `fcvt` collided with libc's.
 - Missing code: runtime exits 4 (`wc: missing code at X`); `npm run discover` adds X to
@@ -73,11 +73,11 @@ generated and ignored.
 - Shadow return stack (`push_ret`/`pop_ret`/`is_return`): a jump to the address the current call
   returns to becomes a C return.
 - `writeIfChanged` keeps unchanged generated files so builds stay incremental (16 KB of code per
-  `seg_*.c`); each declares the functions it uses itself, only `wc_dispatch.c` includes `wc_gen.h`.
+  `seg_*.cpp`); each declares the functions it uses itself, only `wc_dispatch.cpp` includes `wc_gen.h`.
   CMake globs the generated files: the first build after a file appears or disappears fails with
   "GLOB mismatch", a second one succeeds.
 
-## The DOS extender (runtime/flat32.c)
+## The DOS extender (runtime/flat32.cpp)
 
 - Memory: the first MB as on a PC (PSP at 10000h, environment at F000h, BIOS data, video); the
   code and data selectors' offset 0 at linear 400000h, the data segment may grow to 32 MB; other
@@ -92,11 +92,11 @@ generated and ignored.
   (exception handlers), 25C0h-25C2h (conventional memory, 2000:0-9000:0); DPMI 0006h-0008h.
   Anything else stops with exit 2 and its name.
 - Physical memory is linear memory here: a 250Ah mapping of an empty segment moves its base there.
-- Other INT 21h calls go to `dos.c` with `dos_pm` set: pointers DS:EDX/DS:ESI, counts ECX, results
+- Other INT 21h calls go to `dos.cpp` with `dos_pm` set: pointers DS:EDX/DS:ESI, counts ECX, results
   EAX. Interrupts go to the program's protected-mode handler if it set one, else the BIOS code in
-  `pc.c` (no real-mode code ever runs).
+  `pc.cpp` (no real-mode code ever runs).
 
-## The CD (runtime/iso.c, dos.c)
+## The CD (runtime/iso.cpp, dos.cpp)
 
 - `DATA.DAT` is drive D: (`WC_CD=file` for another image): ISO 9660, primary volume descriptor
   names only. Files there open read-only through a `dup` of the image's descriptor, read with
@@ -109,15 +109,19 @@ With `WC_JOYSTICK=0`, ~2.1 M instructions: text-mode loading messages, the CD fo
 archives opened, config read, video and sound drivers loaded; then the first far call into
 loaded code (the HMI driver from `hmidrv.386`) stops it ("missing code at 00000", CS=00AF). Code
 loaded at runtime needs what wc-decomp does for its drivers (capture or pre-recompile, dispatch
-by selector base). Nothing drawn yet. Not looked at yet: the joystick (`joystick.c` is how WC1
+by selector base). Nothing drawn yet. Not looked at yet: the joystick (`joystick.cpp` is how WC1
 reads it), the web page (`web/` is still wc-decomp's).
 
 ## Conventions
 
 - TypeScript run directly by Node (≥ 23.6), ESM, `npm run typecheck`. Java Ghidra scripts in
-  `ghidra_scripts/`. C11 runtime in `runtime/`, tab-indented, short comments.
+  `ghidra_scripts/`. C++23 runtime in `runtime/` and generated code (Apple clang 21, Emscripten),
+  tab-indented, short comments; still mostly C-style from wc-decomp, made idiomatic as it is
+  touched. munt through its C interface (`MT32EMU_API_TYPE 1`). File-scope `const` has internal
+  linkage in C++: the generated tables are declared `extern` in `wc_rt.h`. A full build of the
+  generated code takes ~70 s (no slower than as C).
 - Ghidra 12.2 (Homebrew; JAVA_HOME from the `ghidraRun` wrapper). Headless: a second
   `-scriptPath` overrides the first (join with `;`).
 - Debug env vars: `WC_TRACE` (1 DOS/IRQ/extender calls, 2 every instruction, 3 more), `WC_KEYS`,
-  `WC_POKE`, `WC_WATCH`, `WC_SCREENSHOT`, `WC_HEADLESS`, `WC_CYCLES`, `WC_DUMP` (see `main.c`).
+  `WC_POKE`, `WC_WATCH`, `WC_SCREENSHOT`, `WC_HEADLESS`, `WC_CYCLES`, `WC_DUMP` (see `main.cpp`).
   Ctrl-C prints a report.
