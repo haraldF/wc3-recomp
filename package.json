@@ -1,0 +1,23 @@
+{
+  "name": "wc3-recomp",
+  "version": "0.1.0",
+  "private": true,
+  "license": "BSD-2-Clause",
+  "description": "Statically recompile Wing Commander III's WC3.EXE (MetaWare High C, Phar Lap 386|DOS-Extender) to C with Ghidra",
+  "type": "module",
+  "scripts": {
+    "unpack": "node src/cli.ts unpack",
+    "decompile": "node src/cli.ts decompile",
+    "recomp": "node src/cli.ts recomp",
+    "build": "node src/cli.ts build",
+    "typecheck": "tsc --noEmit",
+    "discover": "node src/cli.ts discover",
+    "play": "node src/cli.ts play",
+    "web": "node src/cli.ts web",
+    "serve": "node src/serve.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "typescript": "^5.9.3"
+  }
+}

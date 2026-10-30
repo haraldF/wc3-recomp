@@ -1,0 +1,204 @@
+/* Runtime for the C that WcRecomp.java generates: an emulated x86 state and the helpers the
+ * translated p-code uses. R[] is Ghidra's x86 register space (byte offsets below), M[] the memory:
+ * the first MB as on a PC (real-mode data, BIOS, video), the program and its heap above (flat32.c).
+ * All values are carried as uint64_t and masked to their size. */
+#pragma once
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+/* Ghidra x86 register space offsets */
+enum {
+	R_AX = 0x0, R_AL = 0x0, R_AH = 0x1, R_CX = 0x4, R_CL = 0x4, R_CH = 0x5,
+	R_DX = 0x8, R_DL = 0x8, R_DH = 0x9, R_BX = 0xc, R_BL = 0xc, R_BH = 0xd,
+	R_SP = 0x10, R_BP = 0x14, R_SI = 0x18, R_DI = 0x1c,
+	R_ES = 0x100, R_CS = 0x102, R_SS = 0x104, R_DS = 0x106, R_FS = 0x108, R_GS = 0x10a,
+	R_CF = 0x200, R_PF = 0x202, R_AF = 0x204, R_ZF = 0x206, R_SF = 0x207,
+	R_TF = 0x208, R_IF = 0x209, R_DF = 0x20a, R_OF = 0x20b, R_IP = 0x284,
+};
+
+#define MEM_SIZE 0x4000000u
+extern uint8_t R[0x400];
+extern uint8_t M[MEM_SIZE + 16];
+extern uint64_t wc_icount;
+extern int wc_trace;
+
+extern uint32_t wc_image_lo, wc_image_hi; /* linear range of the program image */
+
+/* The recompiled program: its file name, the default speed and its start (from its P3 header,
+ * wc_program.c, generated): the image's offset in the flat segment, entry EIP, ESP, and the memory
+ * it needs from offset 0 (image and extra memory). */
+struct wc_program {
+	const char *exe;
+	uint32_t cycles; /* instructions per ms by default (WC_CYCLES) */
+	uint32_t flat_base, flat_eip, flat_esp, flat_size;
+};
+extern const struct wc_program wc_program;
+
+/* Code address (of the generated code) for an address reached with the current CS. */
+uint32_t code_addr(uint64_t linear);
+
+static inline uint64_t rd(uint32_t off, int size) { uint64_t v = 0; memcpy(&v, R + off, size); return v; }
+static inline void wr(uint32_t off, int size, uint64_t v) { memcpy(R + off, &v, size); }
+
+void mem_write_hook(uint32_t addr, int size);
+extern uint32_t wc_watch; /* WC_WATCH: report writes to this linear address (0 = off) */
+extern uint32_t wc_last_ins;
+void watch_hit(uint32_t addr, int size, uint64_t value);
+
+/* The first MB (real-mode addresses: the BIOS data area, the PSP, DOS's buffers) */
+static inline uint64_t mrd(uint64_t addr, int size) { uint64_t v = 0; memcpy(&v, M + (addr & 0xfffff), size); return v; }
+static inline void mwr(uint64_t addr, int size, uint64_t v)
+{
+	uint32_t a = (uint32_t)(addr & 0xfffff);
+	memcpy(M + a, &v, size);
+	if (wc_watch && wc_watch - a < (uint32_t)size) {
+		watch_hit(a, size, v);
+	}
+	if (a >= 0xa0000) {
+		mem_write_hook(a, size);
+	}
+}
+
+/* ---- 32-bit protected mode ----
+ * Memory accesses add the base of their segment register's selector: wc_sb[] holds the bases of
+ * ES, CS, SS, DS, FS, GS (Ghidra's order), which seg_load() keeps up to date. */
+extern uint32_t wc_sb[6];
+void seg_load(int reg, uint64_t selector);
+uint64_t seg_limit(uint64_t selector); /* LSL: the limit's low word, bit 16 set if the selector is valid */
+static inline uint64_t mrd32(uint64_t addr, int size)
+{
+	uint64_t v = 0;
+	memcpy(&v, M + ((uint32_t)addr & (MEM_SIZE - 1)), size);
+	return v;
+}
+static inline void mwr32(uint64_t addr, int size, uint64_t v)
+{
+	uint32_t a = (uint32_t)addr & (MEM_SIZE - 1);
+	memcpy(M + a, &v, size);
+	if (wc_watch && wc_watch - a < (uint32_t)size) {
+		watch_hit(a, size, v);
+	}
+	if (a - 0xa0000 < 0x20000) {
+		mem_write_hook(a, size);
+	}
+}
+/* x87: values of 4 bytes are floats, of 8 doubles, and the 10-byte ST registers carry doubles */
+static inline double x87_fval(uint64_t bits, int size)
+{
+	if (size == 4) {
+		uint32_t b = (uint32_t)bits;
+		float f;
+		memcpy(&f, &b, 4);
+		return f;
+	}
+	double d;
+	memcpy(&d, &bits, 8);
+	return d;
+}
+static inline uint64_t x87_fbits(double d, int size)
+{
+	if (size == 4) {
+		float f = (float)d;
+		uint32_t b;
+		memcpy(&b, &f, 4);
+		return b;
+	}
+	uint64_t b;
+	memcpy(&b, &d, 8);
+	return b;
+}
+static inline uint64_t x87_fcvt(uint64_t a, int from, int to) { return x87_fbits(x87_fval(a, from), to); }
+uint64_t x87_fint(uint64_t a, int from, int to);
+uint64_t x87_ftrunc(uint64_t a, int size);
+static inline uint64_t x87_fadd(uint64_t a, uint64_t b, int s) { return x87_fbits(x87_fval(a, s) + x87_fval(b, s), s); }
+static inline uint64_t x87_fsub(uint64_t a, uint64_t b, int s) { return x87_fbits(x87_fval(a, s) - x87_fval(b, s), s); }
+static inline uint64_t x87_fmul(uint64_t a, uint64_t b, int s) { return x87_fbits(x87_fval(a, s) * x87_fval(b, s), s); }
+static inline uint64_t x87_fdiv(uint64_t a, uint64_t b, int s) { return x87_fbits(x87_fval(a, s) / x87_fval(b, s), s); }
+static inline uint64_t x87_fneg(uint64_t a, int s) { return x87_fbits(-x87_fval(a, s), s); }
+uint64_t x87_fabs(uint64_t a, int s);
+uint64_t x87_fsqrt(uint64_t a, int s);
+uint64_t x87_fceil(uint64_t a, int s);
+uint64_t x87_ffloor(uint64_t a, int s);
+uint64_t x87_fround(uint64_t a, int s);
+uint64_t x87_fnan(uint64_t a, int s);
+
+/* real-mode segment:offset -> linear address */
+static inline uint64_t lin(uint64_t seg, uint64_t off) { return (((seg & 0xffff) << 4) + (off & 0xffff)) & 0xfffff; }
+
+static inline int64_t sx(uint64_t v, int size) { int sh = 64 - 8 * size; return (int64_t)(v << sh) >> sh; }
+static inline uint64_t mask(int size) { return size >= 8 ? ~0ULL : (1ULL << (8 * size)) - 1; }
+static inline uint64_t shl(uint64_t v, uint64_t n) { return n >= 64 ? 0 : v << n; }
+static inline uint64_t shr(uint64_t v, uint64_t n) { return n >= 64 ? 0 : v >> n; }
+static inline uint64_t sar(uint64_t v, uint64_t n, int size) { return (uint64_t)(sx(v, size) >> (n >= 63 ? 63 : n)); }
+static inline uint64_t carry(uint64_t a, uint64_t b, int size) { return ((a & mask(size)) + (b & mask(size))) > mask(size); }
+static inline uint64_t scarry(uint64_t a, uint64_t b, int size)
+{
+	int64_t r = sx(a, size) + sx(b, size);
+	return r != sx((uint64_t)r, size);
+}
+static inline uint64_t sborrow(uint64_t a, uint64_t b, int size)
+{
+	int64_t r = sx(a, size) - sx(b, size);
+	return r != sx((uint64_t)r, size);
+}
+
+void cpu_report(FILE *f); /* instructions executed and registers */
+_Noreturn void cpu_fail(const char *what, uint32_t at);
+void set_flags_word(uint16_t flags); /* the 16-bit FLAGS value into CF, PF, ..., OF */
+_Noreturn void cpu_div0(uint32_t at);
+static inline uint64_t udiv(uint64_t a, uint64_t b, uint32_t at) { if (!b) cpu_div0(at); return a / b; }
+static inline uint64_t urem(uint64_t a, uint64_t b, uint32_t at) { if (!b) cpu_div0(at); return a % b; }
+static inline uint64_t sdiv(uint64_t a, uint64_t b, int size, uint32_t at)
+{
+	if (!b) cpu_div0(at);
+	return (uint64_t)(sx(a, size) / sx(b, size));
+}
+static inline uint64_t srem(uint64_t a, uint64_t b, int size, uint32_t at)
+{
+	if (!b) cpu_div0(at);
+	return (uint64_t)(sx(a, size) % sx(b, size));
+}
+
+/* Enter the recompiled code: run() at an address computed by the program (e.g. an indirect call),
+ * run_code() at a code address (static jumps and calls). */
+void run(uint32_t linear);
+void run_code(uint32_t code);
+/* INT n at code address at; next is the code address of the following instruction */
+void cpu_int(uint64_t n, uint32_t at, uint32_t next);
+uint64_t port_in(uint64_t port, int size);
+void port_out(uint64_t port, uint64_t value, int size);
+void trace_ins(uint32_t at);
+
+/* Shadow return stack: each translated call records where it expects to continue, so that a
+ * jump to that address (a hand-made return) can return from the C function instead. */
+extern uint32_t wc_ret_stack[];
+extern int wc_ret_depth;
+#define WC_RET_STACK 8192
+static inline void push_ret(uint32_t code)
+{
+	if (wc_ret_depth >= WC_RET_STACK) cpu_fail("call stack overflow at", code);
+	wc_ret_stack[wc_ret_depth++] = code;
+}
+static inline void pop_ret(void) { wc_ret_depth--; }
+static inline int is_return(uint32_t code) { return wc_ret_depth > 0 && wc_ret_stack[wc_ret_depth - 1] == code; }
+
+/* Before every instruction: count it, deliver pending hardware interrupts (checked every 1024
+ * instructions, or right away while one is pending), trace. */
+extern int wc_irq_pending;
+void irq_poll(uint32_t at);
+#define TRACE_INS(a) (wc_last_ins = (a), ++wc_icount, (wc_irq_pending || !(wc_icount & 0x3ff)) ? irq_poll(a) : (void)0, \
+	wc_trace >= 2 ? trace_ins(a) : (void)0)
+
+/* registers by name, for the runtime */
+#define AX rd(R_AX, 2)
+#define BX rd(R_BX, 2)
+#define CX rd(R_CX, 2)
+#define DX rd(R_DX, 2)
+#define DL rd(R_DL, 1)
+#define AL rd(R_AL, 1)
+#define AH rd(R_AH, 1)
+#define BL rd(R_BL, 1)
+#define DS rd(R_DS, 2)
+#define ES rd(R_ES, 2)
+static inline void set_cf(int on) { wr(R_CF, 1, on ? 1 : 0); }

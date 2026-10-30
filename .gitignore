@@ -1,0 +1,16 @@
+node_modules/
+out/
+# never commit game files or anything derived from them
+*.EXE
+*.exe
+*.DRV
+*.bin
+*.png
+*.pkg
+*.DAT
+*.dat
+*.iso
+.DS_Store
+*.swp
+roland-mt-32-roms/
+*.rom

@@ -1,0 +1,458 @@
+/* The host with SDL3: a window showing the VGA picture at 4:3, the keyboard as PC scancodes, the
+ * mouse for the mouse driver (mouse.c), a game controller as the joystick (joystick.c).
+ * Cmd+F toggles full screen, Cmd+Up/Down change the speed (in flight the frame rate, elsewhere the
+ * instruction rate), Cmd+Left/Right the mouse's speed in full screen (all shown in the title), Cmd+Q or closing the window quits. WC_HEADLESS=1: no
+ * window. */
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+#include <SDL3/SDL.h>
+
+#include "host.h"
+
+static SDL_Window *window;
+static SDL_Renderer *renderer;
+static SDL_Texture *picture; /* 320x200, the frame in colour */
+static SDL_Texture *scaled;  /* the picture enlarged by whole factors, then smoothly to the window */
+static int scaled_x, scaled_y;
+static SDL_FRect shown_at;    /* where the picture is in the window (render pixels), for the mouse */
+/* Captured (full screen) movement times this: 1 crosses the picture with a movement as wide as the
+ * picture on the screen, which was too slow (WC_MOUSE_SPEED; Cmd+Left/Right change it). */
+static float mouse_speed = 2;
+static SDL_AudioStream *audio;
+static unsigned audio_rate;
+
+int host_has_mouse(void)
+{
+	const char *m = getenv("WC_MOUSE");
+	return window != NULL || (m && *m && *m != '0');
+}
+
+int host_open(void)
+{
+	const char *headless = getenv("WC_HEADLESS");
+	if (headless && *headless && *headless != '0') return 0;
+	/* macOS's GameController framework claims HID joysticks such as flight sticks without reporting
+	 * them, and SDL's IOKit backend then leaves them alone: without it, IOKit and HIDAPI see them all
+	 * (the environment variable SDL_JOYSTICK_MFI=1 overrides this) */
+	SDL_SetHint(SDL_HINT_JOYSTICK_MFI, "0");
+	if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
+		fprintf(stderr, "wc: no window (%s); running headless\n", SDL_GetError());
+		return 0;
+	}
+	if (!SDL_CreateWindowAndRenderer("Wing Commander", 960, 720, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY,
+		    &window, &renderer)) {
+		fprintf(stderr, "wc: no window (%s); running headless\n", SDL_GetError());
+		SDL_Quit();
+		return 0;
+	}
+	SDL_SetRenderVSync(renderer, 1);
+	const char *speed = getenv("WC_MOUSE_SPEED");
+	if (speed && atof(speed) > 0) mouse_speed = (float)atof(speed);
+	picture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_XRGB8888, SDL_TEXTUREACCESS_STREAMING, 320, 200);
+	SDL_SetTextureScaleMode(picture, SDL_SCALEMODE_NEAREST);
+	return 1;
+}
+
+/* ---- keyboard: SDL scancodes (USB HID positions) to PC set 1 ---- */
+
+static uint8_t pc_scancode[SDL_SCANCODE_COUNT];
+static uint8_t held[SDL_SCANCODE_COUNT];
+
+static void init_keys(void)
+{
+	static const struct { SDL_Scancode sdl; uint8_t pc; } map[] = {
+		{ SDL_SCANCODE_ESCAPE, 0x01 }, { SDL_SCANCODE_MINUS, 0x0c }, { SDL_SCANCODE_EQUALS, 0x0d },
+		{ SDL_SCANCODE_BACKSPACE, 0x0e }, { SDL_SCANCODE_TAB, 0x0f }, { SDL_SCANCODE_LEFTBRACKET, 0x1a },
+		{ SDL_SCANCODE_RIGHTBRACKET, 0x1b }, { SDL_SCANCODE_RETURN, 0x1c }, { SDL_SCANCODE_LCTRL, 0x1d },
+		{ SDL_SCANCODE_RCTRL, 0x1d }, { SDL_SCANCODE_SEMICOLON, 0x27 }, { SDL_SCANCODE_APOSTROPHE, 0x28 },
+		{ SDL_SCANCODE_GRAVE, 0x29 }, { SDL_SCANCODE_LSHIFT, 0x2a }, { SDL_SCANCODE_BACKSLASH, 0x2b },
+		{ SDL_SCANCODE_COMMA, 0x33 }, { SDL_SCANCODE_PERIOD, 0x34 }, { SDL_SCANCODE_SLASH, 0x35 },
+		{ SDL_SCANCODE_RSHIFT, 0x36 }, { SDL_SCANCODE_KP_MULTIPLY, 0x37 }, { SDL_SCANCODE_LALT, 0x38 },
+		{ SDL_SCANCODE_RALT, 0x38 }, { SDL_SCANCODE_SPACE, 0x39 }, { SDL_SCANCODE_CAPSLOCK, 0x3a },
+		{ SDL_SCANCODE_NUMLOCKCLEAR, 0x45 }, { SDL_SCANCODE_SCROLLLOCK, 0x46 },
+		{ SDL_SCANCODE_KP_7, 0x47 }, { SDL_SCANCODE_KP_8, 0x48 }, { SDL_SCANCODE_KP_9, 0x49 },
+		{ SDL_SCANCODE_KP_MINUS, 0x4a }, { SDL_SCANCODE_KP_4, 0x4b }, { SDL_SCANCODE_KP_5, 0x4c },
+		{ SDL_SCANCODE_KP_6, 0x4d }, { SDL_SCANCODE_KP_PLUS, 0x4e }, { SDL_SCANCODE_KP_1, 0x4f },
+		{ SDL_SCANCODE_KP_2, 0x50 }, { SDL_SCANCODE_KP_3, 0x51 }, { SDL_SCANCODE_KP_0, 0x52 },
+		{ SDL_SCANCODE_KP_PERIOD, 0x53 }, { SDL_SCANCODE_KP_ENTER, 0x1c }, { SDL_SCANCODE_KP_DIVIDE, 0x35 },
+		{ SDL_SCANCODE_F11, 0x57 }, { SDL_SCANCODE_F12, 0x58 },
+		/* the grey keys as their keypad twins (no E0 prefix), which every DOS game understands */
+		{ SDL_SCANCODE_HOME, 0x47 }, { SDL_SCANCODE_UP, 0x48 }, { SDL_SCANCODE_PAGEUP, 0x49 },
+		{ SDL_SCANCODE_LEFT, 0x4b }, { SDL_SCANCODE_RIGHT, 0x4d }, { SDL_SCANCODE_END, 0x4f },
+		{ SDL_SCANCODE_DOWN, 0x50 }, { SDL_SCANCODE_PAGEDOWN, 0x51 }, { SDL_SCANCODE_INSERT, 0x52 },
+		{ SDL_SCANCODE_DELETE, 0x53 },
+	};
+	for (size_t i = 0; i < sizeof map / sizeof *map; i++) pc_scancode[map[i].sdl] = map[i].pc;
+	static const char rows[] = "1234567890\0\0\0\0qwertyuiop\0\0\0\0asdfghjkl\0\0\0\0\0zxcvbnm";
+	for (size_t i = 0; i < sizeof rows - 1; i++) {
+		char c = rows[i];
+		if (c >= 'a' && c <= 'z') pc_scancode[SDL_SCANCODE_A + (c - 'a')] = (uint8_t)(0x02 + i);
+		else if (c >= '1' && c <= '9') pc_scancode[SDL_SCANCODE_1 + (c - '1')] = (uint8_t)(0x02 + i);
+		else if (c == '0') pc_scancode[SDL_SCANCODE_0] = (uint8_t)(0x02 + i);
+	}
+	for (int i = 0; i < 10; i++) pc_scancode[SDL_SCANCODE_F1 + i] = (uint8_t)(0x3b + i);
+}
+
+static void show_speed(void)
+{
+	char title[120];
+	uint64_t c = pc_cycles(0);
+	if (c) snprintf(title, sizeof title, "Wing Commander \xe2\x80\x94 %llu cycles/ms, %llu fps in flight, mouse \xc3\x97%.2g",
+		(unsigned long long)c, (unsigned long long)pc_flight_fps(0), mouse_speed);
+	else snprintf(title, sizeof title, "Wing Commander \xe2\x80\x94 max speed, mouse \xc3\x97%.2g", mouse_speed);
+	SDL_SetWindowTitle(window, title);
+}
+
+static void key(const SDL_KeyboardEvent *e)
+{
+	if (e->mod & SDL_KMOD_GUI) { /* Cmd: for the Mac, not the game */
+		if (e->down && !e->repeat && e->scancode == SDL_SCANCODE_F) {
+			SDL_SetWindowFullscreen(window, !(SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN));
+		}
+		if (e->down && (e->scancode == SDL_SCANCODE_LEFT || e->scancode == SDL_SCANCODE_RIGHT)) {
+			mouse_speed *= e->scancode == SDL_SCANCODE_RIGHT ? 1.25f : 0.8f;
+			mouse_speed = SDL_clamp(mouse_speed, 0.25f, 16.0f);
+			fprintf(stderr, "wc: mouse speed %.2g (WC_MOUSE_SPEED)\n", mouse_speed); /* full screen has no title */
+			show_speed();
+		}
+		if (e->down && (e->scancode == SDL_SCANCODE_UP || e->scancode == SDL_SCANCODE_DOWN)) {
+			/* what paces the game now: the frame rate in flight, else the instruction rate */
+			int change = e->scancode == SDL_SCANCODE_UP ? 1 : -1;
+			if (pc_in_flight()) fprintf(stderr, "wc: %llu fps in flight (WC_FPS)\n", (unsigned long long)pc_flight_fps(change));
+			else fprintf(stderr, "wc: %llu cycles/ms (WC_CYCLES)\n", (unsigned long long)pc_cycles(change));
+			show_speed();
+		}
+		if (!e->down && held[e->scancode]) { held[e->scancode] = 0; pc_key(pc_scancode[e->scancode] | 0x80); }
+		return;
+	}
+	uint8_t code = pc_scancode[e->scancode];
+	if (!code) return;
+	if (e->down) { /* repeats too, like a PC keyboard's typematic */
+		held[e->scancode] = 1;
+		pc_key(code);
+	}
+	else if (held[e->scancode]) {
+		held[e->scancode] = 0;
+		pc_key(code | 0x80);
+	}
+}
+
+/* Release what is held when the window loses the keyboard, so no key sticks. */
+static void release_all(void)
+{
+	for (int i = 0; i < SDL_SCANCODE_COUNT; i++) {
+		if (held[i]) { held[i] = 0; pc_key(pc_scancode[i] | 0x80); }
+	}
+}
+
+/* ---- the picture ---- */
+
+static void present(void)
+{
+	static uint8_t pixels[320 * 200], palette[256 * 3];
+	static uint64_t shown = ~0ull;
+	uint64_t n = vga_frame(pixels, palette);
+	if (n != shown) {
+		shown = n;
+		uint32_t colour[256];
+		for (int i = 0; i < 256; i++) {
+			const uint8_t *c = palette + 3 * i; /* 6 bits per component to 8 */
+			colour[i] = 0xff000000u | (uint32_t)((c[0] << 2) | (c[0] >> 4)) << 16 |
+				(uint32_t)((c[1] << 2) | (c[1] >> 4)) << 8 | (uint32_t)((c[2] << 2) | (c[2] >> 4));
+		}
+		void *dst;
+		int pitch;
+		if (SDL_LockTexture(picture, NULL, &dst, &pitch)) {
+			for (int y = 0; y < 200; y++) {
+				uint32_t *row = (uint32_t *)((uint8_t *)dst + y * pitch);
+				for (int x = 0; x < 320; x++) row[x] = colour[pixels[y * 320 + x]];
+			}
+			SDL_UnlockTexture(picture);
+		}
+	}
+
+	/* 320x200 shown at 4:3 (VGA pixels are 1.2 times as tall as wide), as large as fits */
+	int w, h;
+	SDL_GetRenderOutputSize(renderer, &w, &h);
+	float dw = (float)w, dh = dw * 3 / 4;
+	if (dh > (float)h) { dh = (float)h; dw = dh * 4 / 3; }
+	SDL_FRect dst = { ((float)w - dw) / 2, ((float)h - dh) / 2, dw, dh };
+	/* sharp but even pixels: enlarge by whole factors without smoothing, then scale smoothly */
+	int sx = (int)SDL_ceilf(dw / 320), sy = (int)SDL_ceilf(dh / 200);
+	if (sx < 1) sx = 1;
+	if (sy < 1) sy = 1;
+	if (!scaled || sx != scaled_x || sy != scaled_y) {
+		if (scaled) SDL_DestroyTexture(scaled);
+		scaled = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_XRGB8888, SDL_TEXTUREACCESS_TARGET, 320 * sx, 200 * sy);
+		SDL_SetTextureScaleMode(scaled, SDL_SCALEMODE_LINEAR);
+		scaled_x = sx;
+		scaled_y = sy;
+	}
+	SDL_SetRenderTarget(renderer, scaled);
+	SDL_RenderTexture(renderer, picture, NULL, NULL);
+	SDL_SetRenderTarget(renderer, NULL);
+	SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+	SDL_RenderClear(renderer);
+	SDL_RenderTexture(renderer, scaled, NULL, &dst);
+	SDL_RenderPresent(renderer);
+	shown_at = dst;
+}
+
+/* ---- mouse: window position onto the 320x200 picture ---- */
+
+/* In full screen the pointer is captured (relative mode), so it never reaches the screen edge
+ * where macOS would show the menu bar or the Dock; the game gets the movement. In a window the
+ * picture under the Mac's pointer is where the game's pointer goes. */
+static void mouse(const SDL_Event *e)
+{
+	float wx, wy, rx, ry;
+	SDL_MouseButtonFlags b = SDL_GetMouseState(&wx, &wy);
+	int buttons = (b & SDL_BUTTON_LMASK ? 1 : 0) | (b & SDL_BUTTON_RMASK ? 2 : 0) | (b & SDL_BUTTON_MMASK ? 4 : 0);
+	if (shown_at.w <= 0 || shown_at.h <= 0) return;
+	if (SDL_GetWindowRelativeMouseMode(window)) {
+		static float fx, fy; /* fractions of picture pixels not passed on yet */
+		if (e->type == SDL_EVENT_MOUSE_MOTION) {
+			float scale = SDL_GetWindowPixelDensity(window) * mouse_speed;
+			fx += e->motion.xrel * scale * 320 / shown_at.w;
+			fy += e->motion.yrel * scale * 200 / shown_at.h;
+		}
+		int dx = (int)fx, dy = (int)fy;
+		fx -= (float)dx;
+		fy -= (float)dy;
+		pc_mouse_move(dx, dy, buttons);
+		return;
+	}
+	SDL_RenderCoordinatesFromWindow(renderer, wx, wy, &rx, &ry);
+	int x = (int)((rx - shown_at.x) * 320 / shown_at.w), y = (int)((ry - shown_at.y) * 200 / shown_at.h);
+	x = x < 0 ? 0 : x > 319 ? 319 : x;
+	y = y < 0 ? 0 : y > 199 ? 199 : y;
+	pc_mouse(x, y, buttons);
+}
+
+/* ---- game controllers and joysticks as joystick A: a gamepad's left stick (or d-pad) and two
+ * buttons, a joystick's first two axes and buttons; the right stick's x (or WC_ROLL_AXIS) rolls ---- */
+
+/* The controller's buttons the joystick has: A or the right trigger fires (button 1), B or the
+ * left trigger is button 2; a few others are keys. */
+static const struct { SDL_GamepadButton button; uint8_t key; } pad_keys[] = {
+	{ SDL_GAMEPAD_BUTTON_WEST, 0x1c },           /* Enter: fire a missile */
+	{ SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, 0x0f }, /* Tab: afterburner */
+	{ SDL_GAMEPAD_BUTTON_DPAD_UP, 0x0d },        /* +: faster */
+	{ SDL_GAMEPAD_BUTTON_DPAD_DOWN, 0x0c },      /* -: slower */
+	{ SDL_GAMEPAD_BUTTON_START, 0x01 },          /* Esc */
+};
+
+static int dead_zone(int16_t raw, int zone)
+{
+	int v = raw * 1000 / 32767;
+	/* a little dead zone against a stick that doesn't quite centre; the rest stretched to full range */
+	if (v > -zone && v < zone) return 0;
+	return v > 0 ? (v - zone) * 1000 / (1000 - zone) : (v + zone) * 1000 / (1000 - zone);
+}
+
+static void gamepad(const SDL_Event *e)
+{
+	if (e->type == SDL_EVENT_GAMEPAD_ADDED) {
+		SDL_Gamepad *g = SDL_OpenGamepad(e->gdevice.which);
+		if (g) fprintf(stderr, "wc: game controller \"%s\" as the joystick\n", SDL_GetGamepadName(g));
+		return;
+	}
+	if (e->type == SDL_EVENT_GAMEPAD_REMOVED) {
+		SDL_Gamepad *g = SDL_GetGamepadFromID(e->gdevice.which);
+		if (g) SDL_CloseGamepad(g);
+		pc_joystick(0, 0, 0, 0);
+		return;
+	}
+	SDL_Gamepad *g = SDL_GetGamepadFromID(e->gdevice.which);
+	if (!g) return;
+	if (e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN || e->type == SDL_EVENT_GAMEPAD_BUTTON_UP) {
+		for (size_t i = 0; i < sizeof pad_keys / sizeof *pad_keys; i++) {
+			if (e->gbutton.button == pad_keys[i].button) pc_key(pad_keys[i].key | (e->gbutton.down ? 0 : 0x80));
+		}
+	}
+	int x = dead_zone(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTX), 100), y = dead_zone(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTY), 100);
+	if (SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_DPAD_LEFT)) x = -1000;
+	if (SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) x = 1000;
+	int buttons = (SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_SOUTH) ||
+		SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 16000 ? 1 : 0) |
+		(SDL_GetGamepadButton(g, SDL_GAMEPAD_BUTTON_EAST) ||
+		SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 16000 ? 2 : 0);
+	pc_joystick(x, y, dead_zone(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_RIGHTX), 150), buttons);
+}
+
+/* A joystick that isn't a gamepad (a flight stick): X and Y steer, the trigger (button 1) and the
+ * thumb button (2) are the joystick's; other buttons press keys (pc_stick_key: 3 Enter, 4 Tab,
+ * WC_STICK_KEYS), the hat up/down + and -,
+ * left/right , and . (roll), which repeat while held like keys: the game rolls faster with each.
+ * The twist doesn't roll: twisting while steering rolled too much. WC_ROLL_AXIS=n rolls with axis n
+ * (flight sticks order their axes X, Y, twist (Rz), throttle: 2). A wider dead zone keeps steering
+ * from rolling; and the axis counts only once it has been centred, so a throttle there doesn't roll
+ * forever. */
+static int roll_axis = -2;    /* -2: not read yet */
+static bool roll_centred;
+static uint8_t hat;          /* the hat's last position */
+static uint8_t roll_key;     /* , or . held by the hat */
+static uint64_t roll_next_ns; /* when it repeats */
+
+static void roll_repeat(void)
+{
+	if (roll_key && SDL_GetTicksNS() >= roll_next_ns) {
+		pc_key(roll_key);
+		roll_next_ns += 70000000; /* ~14 per second, from the start */
+	}
+}
+
+static void joystick(const SDL_Event *e)
+{
+	SDL_JoystickID id = e->jdevice.which;
+	if (SDL_IsGamepad(id)) return; /* its gamepad events count */
+	if (e->type == SDL_EVENT_JOYSTICK_ADDED) {
+		SDL_Joystick *j = SDL_OpenJoystick(id);
+		if (roll_axis == -2) {
+			const char *e = getenv("WC_ROLL_AXIS");
+			roll_axis = e ? atoi(e) : -1;
+		}
+		if (j) {
+			fprintf(stderr, "wc: joystick \"%s\" (%d axes", SDL_GetJoystickName(j), SDL_GetNumJoystickAxes(j));
+			if (roll_axis >= 0 && roll_axis < SDL_GetNumJoystickAxes(j)) fprintf(stderr, ", axis %d rolls", roll_axis);
+			fprintf(stderr, ")\n");
+		}
+		roll_centred = false;
+		return;
+	}
+	SDL_Joystick *j = SDL_GetJoystickFromID(id);
+	if (!j) return;
+	if (e->type == SDL_EVENT_JOYSTICK_REMOVED) {
+		SDL_CloseJoystick(j);
+		/* let go of what the hat held */
+		if (hat & SDL_HAT_UP) pc_key(0x0d | 0x80);
+		if (hat & SDL_HAT_DOWN) pc_key(0x0c | 0x80);
+		if (roll_key) pc_key(roll_key | 0x80);
+		hat = roll_key = 0;
+		pc_joystick(0, 0, 0, 0);
+		return;
+	}
+	if (e->type == SDL_EVENT_JOYSTICK_BUTTON_DOWN || e->type == SDL_EVENT_JOYSTICK_BUTTON_UP) {
+		uint8_t key = pc_stick_key(e->jbutton.button);
+		if (key) pc_key(key | (e->jbutton.down ? 0 : 0x80));
+	}
+	if (e->type == SDL_EVENT_JOYSTICK_HAT_MOTION && e->jhat.hat == 0) {
+		uint8_t now = e->jhat.value;
+		if ((now ^ hat) & SDL_HAT_UP) pc_key(0x0d | (now & SDL_HAT_UP ? 0 : 0x80));
+		if ((now ^ hat) & SDL_HAT_DOWN) pc_key(0x0c | (now & SDL_HAT_DOWN ? 0 : 0x80));
+		uint8_t roll = now & SDL_HAT_LEFT ? 0x33 : now & SDL_HAT_RIGHT ? 0x34 : 0;
+		if (roll != roll_key) {
+			if (roll_key) pc_key(roll_key | 0x80);
+			roll_key = roll;
+			roll_next_ns = SDL_GetTicksNS();
+			roll_repeat();
+		}
+		hat = now;
+	}
+	int roll = 0;
+	if (roll_axis >= 0 && roll_axis < SDL_GetNumJoystickAxes(j)) {
+		roll = dead_zone(SDL_GetJoystickAxis(j, roll_axis), 150);
+		if (!roll) roll_centred = true;
+		if (!roll_centred) roll = 0;
+	}
+	pc_joystick(dead_zone(SDL_GetJoystickAxis(j, 0), 100), dead_zone(SDL_GetJoystickAxis(j, 1), 100), roll,
+		(SDL_GetJoystickButton(j, 0) ? 1 : 0) | (SDL_GetJoystickButton(j, 1) ? 2 : 0));
+}
+
+/* ---- sound: the emulation's samples into an SDL audio stream (it converts the rate) ---- */
+
+int host_audio_open(unsigned rate)
+{
+	if (!window || !SDL_InitSubSystem(SDL_INIT_AUDIO)) return 0;
+	SDL_AudioSpec spec = { SDL_AUDIO_S16, 2, (int)rate };
+	audio = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, NULL, NULL);
+	if (!audio) {
+		fprintf(stderr, "wc: no sound (%s)\n", SDL_GetError());
+		return 0;
+	}
+	audio_rate = rate;
+	static int16_t silence[2 * 4096];
+	SDL_PutAudioStreamData(audio, silence, (int)(rate * 60 / 1000) * 4); /* 60 ms ahead against gaps */
+	SDL_ResumeAudioStreamDevice(audio);
+	return 1;
+}
+
+/* Called on the emulation's thread (SDL audio streams lock themselves). */
+void host_audio(const int16_t *frames, unsigned count)
+{
+	if (!audio) return;
+	if (SDL_GetAudioStreamQueued(audio) > (int)(audio_rate * 4 / 4)) { /* over 0.25 s behind: catch up */
+		SDL_ClearAudioStream(audio);
+	}
+	SDL_PutAudioStreamData(audio, frames, (int)count * 4);
+}
+
+_Noreturn void host_exit(int code)
+{
+	exit(code);
+}
+
+/* Files the game writes are in the game folder already. */
+void host_file_saved(const char *path)
+{
+	(void)path;
+}
+
+/* ---- threads ---- */
+
+static void *game_thread(void *arg)
+{
+	((void (*)(void))arg)();
+	host_exit(0);
+}
+
+_Noreturn void host_run(void (*game)(void))
+{
+	/* the recompiled code nests C calls as deeply as the game nests calls and interrupts */
+	pthread_attr_t attr;
+	pthread_attr_init(&attr);
+	pthread_attr_setstacksize(&attr, 256u << 20);
+	pthread_t thread;
+	if (pthread_create(&thread, &attr, game_thread, (void *)game)) {
+		fprintf(stderr, "wc: cannot start the game thread\n");
+		exit(1);
+	}
+	if (!window) {
+		pthread_join(thread, NULL);
+		exit(0);
+	}
+	init_keys();
+	show_speed();
+	SDL_HideCursor(); /* the game draws its own */
+	for (;;) {
+		SDL_Event e;
+		while (SDL_PollEvent(&e)) {
+			switch (e.type) {
+			case SDL_EVENT_QUIT: exit(0);
+			case SDL_EVENT_KEY_DOWN:
+			case SDL_EVENT_KEY_UP: key(&e.key); break;
+			case SDL_EVENT_WINDOW_FOCUS_LOST: release_all(); break;
+			case SDL_EVENT_MOUSE_MOTION:
+			case SDL_EVENT_MOUSE_BUTTON_DOWN:
+			case SDL_EVENT_MOUSE_BUTTON_UP: mouse(&e); break;
+			case SDL_EVENT_GAMEPAD_ADDED:
+			case SDL_EVENT_GAMEPAD_REMOVED:
+			case SDL_EVENT_GAMEPAD_AXIS_MOTION:
+			case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+			case SDL_EVENT_GAMEPAD_BUTTON_UP: gamepad(&e); break;
+			case SDL_EVENT_JOYSTICK_ADDED:
+			case SDL_EVENT_JOYSTICK_REMOVED:
+			case SDL_EVENT_JOYSTICK_AXIS_MOTION:
+			case SDL_EVENT_JOYSTICK_HAT_MOTION:
+			case SDL_EVENT_JOYSTICK_BUTTON_DOWN:
+			case SDL_EVENT_JOYSTICK_BUTTON_UP: joystick(&e); break;
+			case SDL_EVENT_WINDOW_ENTER_FULLSCREEN: SDL_SetWindowRelativeMouseMode(window, true); break;
+			case SDL_EVENT_WINDOW_LEAVE_FULLSCREEN: SDL_SetWindowRelativeMouseMode(window, false); break;
+			}
+		}
+		roll_repeat();
+		present(); /* waits for the display's refresh */
+	}
+}
