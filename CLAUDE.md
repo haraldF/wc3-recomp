@@ -58,6 +58,9 @@ generated and ignored.
   at A0000h out and the new bank in. Frames carry their size (`vga_frame`); `WC_SCREENSHOT` files
   hold 640x480 pixels then. The mouse stays in 320x200 terms, scaled to the game's 640x480 range,
   so the hotspot positions below hold in both modes.
+- Movies at 640x480 are 240 lines, shown doubled: the game sets bit 7 of CRTC register 9 (3D4h/3D5h,
+  maximum scan line) and toggles the sequencer's screen-off bit (3C4h index 1, bit 5). Ignored,
+  they filled the top 200 lines. `vga_picture` repeats lines by register 9.
 - Flight: the space backdrop is drawn by a texture mapper (b3757..) that patches its row table's
   address into its own displacements (`MOV ES:[0xb375a],EAX`, 15 of them); recompiled with the
   placeholder (-1) it drew black. The generator's patched-constant handling (drivers before) now

@@ -59,6 +59,10 @@ static uint8_t vram[VRAM];
 static int svga;        /* in mode 101h */
 static unsigned bank;   /* the bank in the window at A0000h */
 static uint32_t display_start; /* where the picture starts in video memory (4F07h) */
+/* the CRT controller's and the sequencer's registers (3D4h/3D5h, 3C4h/3C5h): only the maximum scan
+ * line (CRTC 9: bit 7 doubles every line, bits 0-4 repeat it) and screen off (sequencer 1, bit 5)
+ * change the picture here; the game's movies at 640x480 are 240 lines, doubled */
+static uint8_t crtc[32], crtc_index, seq[8], seq_index;
 
 /* The window's contents go back to video memory (the program wrote them there). */
 static void bank_flush(void)
@@ -83,6 +87,28 @@ void vga_window_function(void)
 
 /* ---- frames for the host ---- */
 
+/* The picture as it is now: its width and height, the pixels into buf (up to 640x480 bytes). */
+int vga_picture(uint8_t *buf, int *w, int *h)
+{
+	if (svga) {
+		bank_flush();
+		*w = 640;
+		*h = 480;
+		int repeat = ((crtc[9] & 0x1f) + 1) * (crtc[9] & 0x80 ? 2 : 1);
+		for (int y = 0; y < 480; y++) {
+			uint32_t from = display_start + (uint32_t)(y / repeat) * 640;
+			memcpy(buf + y * 640, vram + (from + 640 <= VRAM ? from : 0), 640);
+		}
+	}
+	else {
+		*w = 320;
+		*h = 200;
+		memcpy(buf, M + 0xa0000, 320 * 200);
+	}
+	if (seq[1] & 0x20) memset(buf, 0, (size_t)*w * *h); /* screen off */
+	return 1;
+}
+
 static pthread_mutex_t frame_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint8_t frame_pixels[640 * 480], frame_palette[256 * 3];
 static int frame_w = 320, frame_h = 200;
@@ -95,17 +121,7 @@ void vga_poll(uint64_t now)
 	if (frame == frame_taken) return;
 	frame_taken = frame;
 	pthread_mutex_lock(&frame_lock);
-	if (svga) {
-		bank_flush();
-		frame_w = 640;
-		frame_h = 480;
-		memcpy(frame_pixels, vram + display_start, 640 * 480);
-	}
-	else {
-		frame_w = 320;
-		frame_h = 200;
-		memcpy(frame_pixels, M + 0xa0000, 320 * 200);
-	}
+	vga_picture(frame_pixels, &frame_w, &frame_h);
 	memcpy(frame_palette, wc_palette, sizeof frame_palette);
 	frame_count++;
 	pthread_mutex_unlock(&frame_lock);
@@ -144,6 +160,10 @@ uint64_t vga_in(uint64_t port)
 	switch (port) {
 	case 0x3da: v = status(); break;
 	case 0x3cc: v = misc_output; break;
+	case 0x3c4: v = seq_index; break;
+	case 0x3c5: v = seq[seq_index & 7]; break;
+	case 0x3d4: v = crtc_index; break;
+	case 0x3d5: v = crtc[crtc_index & 31]; break;
 	case 0x3c9:
 		v = wc_palette[dac_read][dac_part];
 		if (++dac_part == 3) { dac_part = 0; dac_read++; }
@@ -156,6 +176,16 @@ void vga_out(uint64_t port, uint64_t value)
 {
 	switch (port) {
 	case 0x3c2: misc_output = (uint8_t)value; break;
+	case 0x3c4: /* a word: index and data */
+		seq_index = (uint8_t)value;
+		if (value > 0xff) seq[seq_index & 7] = (uint8_t)(value >> 8);
+		break;
+	case 0x3c5: seq[seq_index & 7] = (uint8_t)value; break;
+	case 0x3d4:
+		crtc_index = (uint8_t)value;
+		if (value > 0xff) crtc[crtc_index & 31] = (uint8_t)(value >> 8);
+		break;
+	case 0x3d5: crtc[crtc_index & 31] = (uint8_t)value; break;
 	case 0x3c7: dac_read = (uint8_t)value; dac_part = 0; break;
 	case 0x3c8: dac_write = (uint8_t)value; dac_part = 0; break;
 	case 0x3c9:
@@ -172,22 +202,6 @@ void vga_init(void)
 
 /* ---- video BIOS (INT 10h): modes and the DAC; text output is not shown ---- */
 
-/* The picture as it is now (for WC_SCREENSHOT): width and height, pixels into buf (640x480 bytes). */
-int vga_picture(uint8_t *buf, int *w, int *h)
-{
-	if (svga) {
-		bank_flush();
-		memcpy(buf, vram + display_start, 640 * 480);
-		*w = 640;
-		*h = 480;
-	}
-	else {
-		memcpy(buf, M + 0xa0000, 320 * 200);
-		*w = 320;
-		*h = 200;
-	}
-	return 1;
-}
 
 void vga_bios(uint32_t at);
 extern int dos_real; /* called through Phar Lap's real-mode interrupt (2511h): ES is a segment */
@@ -261,6 +275,7 @@ static void vesa(uint32_t at)
 		svga = 1;
 		bank = 0;
 		display_start = 0;
+		crtc[9] = 0x40; /* one scan line per line */
 		if (!(mode & 0x8000)) {
 			memset(vram, 0, sizeof vram);
 			memset(M + 0xa0000, 0, BANK);
@@ -305,6 +320,7 @@ void vga_bios(uint32_t at)
 	case 0x00: { /* set mode */
 		uint8_t mode = al & 0x7f;
 		svga = 0;
+		crtc[9] = mode == 0x13 ? 0x41 : 0x4f; /* mode 13h: every line twice */
 		M[0x449] = mode;
 		mwr(0x44a, 2, mode == 0x13 || mode <= 1 ? 40 : 80);
 		if (mode == 0x13 && !(al & 0x80)) memset(M + 0xa0000, 0, 0x10000);
