@@ -645,7 +645,7 @@ uint64_t port_in(uint64_t port, int size)
 	case 0x61: v = 0; break;
 	case 0x201: v = joystick_in(); break;
 	case 0x64: v = kbd_head != kbd_tail ? 1 : 0; break;
-	case 0x3c7: case 0x3c8: case 0x3c9: case 0x3da: v = vga_in(port); break;
+	case 0x3c7: case 0x3c8: case 0x3c9: case 0x3cc: case 0x3da: v = vga_in(port); break;
 	case 0x388: case 0x389: v = opl_in(port); break;
 	case 0x330: case 0x331: v = mt32_in(port); break;
 	default: if (sb_port(port)) v = sb_in(port); break;
@@ -665,7 +665,7 @@ void port_out(uint64_t port, uint64_t value, int size)
 	case 0x21:
 		pic_mask = (uint8_t)value;
 		break;
-	case 0x3c7: case 0x3c8: case 0x3c9: vga_out(port, value); break;
+	case 0x3c2: case 0x3c7: case 0x3c8: case 0x3c9: vga_out(port, value); break;
 	case 0x201: joystick_out(); break;
 	case 0x388: case 0x389: opl_out(port, value); break;
 	case 0x330: case 0x331: mt32_out(port, value); break;
@@ -801,6 +801,15 @@ static void bios_work(uint8_t n, uint32_t at)
 		dos_int(n, at);
 		break;
 	}
+}
+
+/* A far call to real-mode code (the extender's AX=250Eh): only the BIOS's entries F000:nn, which a
+ * program chaining to an interrupt's old vector calls. Returns 0 for anything else. */
+int bios_far_call(uint32_t seg_off, uint32_t at)
+{
+	if (seg_off >> 16 != BIOS_SEG || (seg_off & 0xffff) > 0xff) return 0;
+	bios_work((uint8_t)seg_off, at);
+	return 1;
 }
 
 /* ---- setup ---- */

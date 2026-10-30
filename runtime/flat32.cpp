@@ -212,6 +212,7 @@ int pm_interrupt(uint8_t n, uint32_t ret)
 	return 1;
 }
 
+int bios_far_call(uint32_t seg_off, uint32_t at);
 static void pharlap(uint32_t at);
 static void dpmi(uint32_t at);
 
@@ -372,6 +373,9 @@ static void pharlap(uint32_t at)
 		if (wc_trace) fprintf(stderr, "wc: mapped at %04x:%08llx (base %08x)\n", es, rd(R_AX, 4), desc[i].base);
 		break;
 	}
+	case 0x0e: /* call the real-mode procedure at EBX (segment:offset): our BIOS's entries only */
+		if (!bios_far_call(ebx, at)) unknown("real-mode procedure call to", ebx >> 16, at);
+		break;
 	case 0x11: /* issue a real-mode interrupt: DS:EDX a parameter block */
 		real_interrupt(ds + edx, at);
 		break;
@@ -518,6 +522,7 @@ void flat32_start(const char *dir, int argc, char **argv, void (*set_command_lin
 	set_desc(SEL_ENV, ENV_LINEAR, 0xfff);
 	set_desc(SEL_LOW, 0, 0xfffff);
 
+	wc_code_base = PROGRAM_BASE;
 	seg_load(1, SEL_CODE);
 	seg_load(3, SEL_DATA | 3);
 	seg_load(2, SEL_DATA | 3);

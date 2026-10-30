@@ -87,11 +87,16 @@ uint64_t vga_frame(uint8_t pixels[320 * 200], uint8_t palette[256 * 3])
 
 /* ---- ports ---- */
 
+/* the Miscellaneous Output register: bit 0 set puts the CRT controller at 3Dxh (colour), where
+ * drivers look for the retrace (MCGA.DLL reads it to choose 3BAh or 3DAh) */
+static uint8_t misc_output = 0x63;
+
 uint64_t vga_in(uint64_t port)
 {
 	uint64_t v = 0;
 	switch (port) {
 	case 0x3da: v = status(); break;
+	case 0x3cc: v = misc_output; break;
 	case 0x3c9:
 		v = wc_palette[dac_read][dac_part];
 		if (++dac_part == 3) { dac_part = 0; dac_read++; }
@@ -103,6 +108,7 @@ uint64_t vga_in(uint64_t port)
 void vga_out(uint64_t port, uint64_t value)
 {
 	switch (port) {
+	case 0x3c2: misc_output = (uint8_t)value; break;
 	case 0x3c7: dac_read = (uint8_t)value; dac_part = 0; break;
 	case 0x3c8: dac_write = (uint8_t)value; dac_part = 0; break;
 	case 0x3c9:

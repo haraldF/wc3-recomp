@@ -19,6 +19,7 @@
 #include "wc_rt.h"
 
 void cpu_report(FILE *f);
+void wc_dump_memory(const char *why);
 
 const char *wc_game_dir = ".";
 uint16_t wc_psp_seg;
@@ -735,6 +736,7 @@ static void dos(uint32_t at)
 		break;
 	case 0x4c: /* exit */
 		fflush(stdout);
+		wc_dump_memory("the program exited");
 		if (wc_trace) {
 			fprintf(stderr, "wc: program exited with code %llu\n", AL);
 			cpu_report(stderr);

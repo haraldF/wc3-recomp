@@ -44,7 +44,16 @@ generated and ignored.
 - No VESA BIOS: "No VESA Driver -- Cannot use SVGA" and it takes `MCGA.DLL` (320x200) instead of
   `VESA480.DLL`; both are LX modules ("386FX", Miles Design 1992/93).
 - Sound: `hmidrv.386` on the CD is a library of HMI SOS drivers, one per card; the game loads the
-  one `WC3.CFG` names into memory and far-calls it (selector AFh, offset 0).
+  ones it needs into conventional memory blocks (25C0h), makes data and code selectors for them
+  (2531h) and far-calls them. GOG's `WC3.CFG` (dwords): music device A001h (MPU-401, General MIDI)
+  at 330h, digital E016h at 220h, IRQ 5, DMA 1 and 5 (a Sound Blaster 16).
+- The MPU-401 detection driver has a bug on its timeout path (a `PUSH ECX` popped twice, then a
+  stray `POP DS`): harmless where an MPU-401 answers, so one always does (`mt32.cpp`, `WC_MPU=0`
+  off); its MIDI goes nowhere without `WC_MT32` (no General MIDI synth yet).
+- The video DLL (MCGA.DLL) finds the CRT controller by reading the Miscellaneous Output register
+  (3CCh, bit 0); without it, it waited for a retrace on 3BAh forever.
+- The digital driver needs a Sound Blaster 16 (41h rate, Bxh/Cxh transfers, DMA channel 5): the
+  intro's movie waits for its sound blocks.
 
 ## Static recompilation (WcRecomp.java + runtime/)
 
@@ -71,7 +80,35 @@ generated and ignored.
   `entries.txt` (repository root; commit it after discover rounds) and recompiles. Bugs elsewhere
   produce garbage addresses: check an entry is real code before keeping it.
 - Shadow return stack (`push_ret`/`pop_ret`/`is_return`): a jump to the address the current call
-  returns to becomes a C return.
+  returns to becomes a C return. A RET/IRET to an address a frame further up expects unwinds to it
+  (`ret_to`, `wc_unwind`; each call site does `if (pop_ret()) return;`): the timer handler's last
+  "callback" (a31c7) ends the interrupt with IRETD instead of returning.
+
+## Code loaded at runtime (drivers)
+
+- Exit 5: the runtime saves the code (`WC_LOADED_DIR`) and `discover` names it by a hash of its
+  first 4 KB (`drivers.txt`, kept in the repository: dN, plus the offset for flat ones), imports it
+  into Ghidra (`WC/loaded`, `WcDriverSetup.java` seeds its entries, no function start search) and
+  recompiles it (`WcRecomp.java driver`: `drv_dN.cpp`, `drv_dN_tables.cpp`; `wc_drivers.cpp` lists
+  them).
+- Two kinds: with a code selector of their own (the HMI drivers in conventional memory), recompiled
+  at 10000000h + n * 1000000h and found by their bytes at that selector's base; and "flat" ones
+  loaded into the program's own memory and called through its code selector (the 386FX DLLs),
+  recompiled at the offset they were captured from (a 128 KB window), so their relative calls into
+  the program stay right.
+- Recognised by their instruction bytes. The same memory holds different code over time (the game
+  loaded one HMI driver, then another over it): of the drivers whose bytes are there, the one with
+  an instruction at the target wins; if none has one and memory differs from every capture there,
+  it is new code. Capturing stale bytes once made text decode as code (`140023ff`, removed).
+- Inside recompiled drivers, CALL pushes the virtual address: return addresses at 10000000h and up
+  are code addresses as they are (`code_addr`, `run`). Code that reads its own address (`call $+5;
+  pop`) would see the virtual one.
+- Self-modifying drivers: `MOV FS:[1972h],FS` writes the data selector into a `MOV AX,0FFFFh`.
+  Stores to fixed offsets inside the driver's own instructions are found (`findPatches`, also
+  FS/GS-based: Ghidra adds its FS_OFFSET register); such constants are read from memory at runtime
+  and their bytes left out of the recognition.
+- Selector 0 once made `discover` capture "a driver" from address 0 (d3 then; removed): check new
+  captures make sense.
 - `writeIfChanged` keeps unchanged generated files so builds stay incremental (16 KB of code per
   `seg_*.cpp`); each declares the functions it uses itself, only `wc_dispatch.cpp` includes `wc_gen.h`.
   CMake globs the generated files: the first build after a file appears or disappears fails with
@@ -105,12 +142,10 @@ generated and ignored.
 
 ## State
 
-With `WC_JOYSTICK=0`, ~2.1 M instructions: text-mode loading messages, the CD found, all `.TRE`
-archives opened, config read, video and sound drivers loaded; then the first far call into
-loaded code (the HMI driver from `hmidrv.386`) stops it ("missing code at 00000", CS=00AF). Code
-loaded at runtime needs what wc-decomp does for its drivers (capture or pre-recompile, dispatch
-by selector base). Nothing drawn yet. Not looked at yet: the joystick (`joystick.cpp` is how WC1
-reads it), the web page (`web/` is still wc-decomp's).
+With `WC_JOYSTICK=0`: the HMI drivers and MCGA.DLL recompiled, the intro starts (the first
+pictures of space, drawn in mode 13h) and plays its sound on the SB16. Not looked at yet: the
+joystick (`joystick.cpp` is how WC1 reads it), General MIDI, the web page (`web/` is still
+wc-decomp's).
 
 ## Conventions
 

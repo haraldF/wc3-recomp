@@ -1,6 +1,7 @@
-/* Roland MT-32: an MPU-401 at ports 330h (data) and 331h (status, commands) in UART mode, whose
- * MIDI goes to munt's libmt32emu (third_party/munt, LGPL 2.1+). WC_MT32=folder turns it on with the
- * ROM images found there (and in its subfolders); main.cpp then also tells the game to use it ("r").
+/* An MPU-401 at ports 330h (data) and 331h (status, commands), as GOG's WC3.CFG expects (General
+ * MIDI there; WC_MPU=0: no card). Its MIDI goes to a Roland MT-32, munt's libmt32emu
+ * (third_party/munt, LGPL 2.1+), with WC_MT32=folder holding the ROM images (or its subfolders);
+ * without it nowhere yet (no General MIDI synth).
  * WC_MT32_MACHINE picks the model (munt's names: mt32_1_07, cm32l_1_02, ...), else the first one
  * the folder has ROMs for, in the order below. Samples are made like the AdLib's (opl.cpp). */
 #include <dirent.h>
@@ -25,6 +26,7 @@ static const char *const machines[] = {
 };
 
 static mt32emu_context synth;
+static bool mpu; /* the card is there */
 static int playing;
 static unsigned rate;
 static uint64_t start_ns, frames_done;
@@ -61,7 +63,7 @@ static void reply(uint8_t v)
 
 uint64_t mt32_in(uint64_t port)
 {
-	if (!synth) return 0xff; /* no card */
+	if (!mpu) return 0xff; /* no card */
 	if (port == 0x331) return replies_len ? 0x3f : 0xbf; /* bit 7 clear: data to read; bit 6 clear: ready */
 	if (!replies_len) return 0xff;
 	uint8_t v = replies[0];
@@ -71,11 +73,13 @@ uint64_t mt32_in(uint64_t port)
 
 void mt32_out(uint64_t port, uint64_t value)
 {
-	if (!synth) return;
+	if (!mpu) return;
 	uint8_t v = (uint8_t)value;
 	if (port == 0x330) {
-		mt32_poll(pc_now_ns()); /* the sound up to this moment, before the message */
-		mt32emu_parse_stream(synth, &v, 1);
+		if (synth) {
+			mt32_poll(pc_now_ns()); /* the sound up to this moment, before the message */
+			mt32emu_parse_stream(synth, &v, 1);
+		}
 		return;
 	}
 	if (wc_trace) fprintf(stderr, "wc: MPU-401 command %02x\n", v);
@@ -116,8 +120,10 @@ static void add_roms(const char *machine, const char *dir, int depth)
 
 void mt32_init(void)
 {
+	const char *off = getenv("WC_MPU");
+	mpu = !off || strcmp(off, "0");
 	const char *dir = getenv("WC_MT32");
-	if (!dir || !*dir) return;
+	if (!mpu || !dir || !*dir) return;
 	const char *only = getenv("WC_MT32_MACHINE");
 	for (size_t i = 0; i < sizeof machines / sizeof *machines && !synth; i++) {
 		const char *machine = only && *only ? only : machines[i];

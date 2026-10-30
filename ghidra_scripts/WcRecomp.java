@@ -14,6 +14,9 @@
 // one per line) in the entries file and they get recompiled too, along with any functions they
 // call. The runtime reports such addresses ("npm run discover").
 // Args: <output dir> <entries file>
+//   or:  driver <output dir> <name> <entries file>  for code the game loaded at runtime (captured from
+//        memory, imported at its virtual address): drv_<name>.cpp and drv_<name>_tables.cpp (its
+//        instruction addresses, the bytes they occupy and the captured image, to recognise it).
 //@category WC
 
 import java.nio.file.Files;
@@ -54,11 +57,22 @@ public class WcRecomp extends GhidraScript {
 	private boolean stringOp;
 	private final Set<Long> ediUniques = new HashSet<>();
 
+	/** Driver mode: its name, else null; address -> length of each emitted instruction */
+	private String driver;
+	private final TreeMap<Long, Integer> codeBytes = new TreeMap<>();
+	/** Driver mode: addresses of the driver's own bytes that it writes with stores to fixed addresses
+	 * (self-modifying code: e.g. a selector patched into a MOV's immediate); the instruction being
+	 * translated */
+	private final Set<Long> patched = new HashSet<>();
+	private Instruction current;
+
 	@Override
 	protected void run() throws Exception {
 		String[] args = getScriptArgs();
-		Path out = Path.of(args[0]);
-		Path entriesFile = Path.of(args[1]);
+		int a0 = args[0].equals("driver") ? 1 : 0;
+		driver = a0 > 0 ? args[2] : null;
+		Path out = Path.of(args[a0]);
+		Path entriesFile = Path.of(args[a0 > 0 ? 3 : 1]);
 		Files.createDirectories(out);
 		List<Function> functions = new ArrayList<>();
 		for (Function f : currentProgram.getFunctionManager().getFunctions(true)) {
@@ -69,7 +83,8 @@ public class WcRecomp extends GhidraScript {
 		if (Files.exists(entriesFile)) {
 			for (String line : Files.readAllLines(entriesFile)) {
 				line = line.replaceAll("#.*", "").trim();
-				if (!line.isEmpty()) {
+				// the entries file has the program's and the drivers' entries: only this one's
+				if (!line.isEmpty() && currentProgram.getMemory().contains(toAddr(Long.parseLong(line, 16)))) {
 					seeds.add(Long.parseLong(line, 16));
 				}
 			}
@@ -95,6 +110,9 @@ public class WcRecomp extends GhidraScript {
 		for (Fragment fr : fragments) {
 			entries.put(fr.entry, fname(fr.entry));
 		}
+		if (driver != null) {
+			findPatches(functions, fragments);
+		}
 
 		Map<String, StringBuilder> files = new TreeMap<>();
 		// address of every emitted instruction -> C function, for run()
@@ -117,6 +135,12 @@ public class WcRecomp extends GhidraScript {
 		for (var e : files.entrySet()) {
 			writeIfChanged(out.resolve(e.getKey()), withPrototypes(e.getValue().toString()));
 		}
+		if (driver != null) {
+			writeDriverTables(out, owner);
+			println(String.format("WcRecomp: driver %s: %d functions + %d fragments, %d instructions; %d unhandled p-code ops",
+				driver, functions.size(), fragments.size(), owner.size(), unhandled));
+			return;
+		}
 		// The build compiles every file here: remove those that no longer have code.
 		try (var old = Files.newDirectoryStream(out, "seg_*.cpp*")) {
 			for (Path p : old) {
@@ -136,9 +160,138 @@ public class WcRecomp extends GhidraScript {
 			owner.size(), files.size(), farJumpFixes, iretFixes, lslFixes, unhandled));
 	}
 
-	/** 16 KB of code per file, so the build can work in parallel */
-	private static StringBuilder fileFor(long entry, Map<String, StringBuilder> files) {
-		return files.computeIfAbsent(String.format("seg_%05x.cpp", entry & ~0x3fffL), k -> new StringBuilder());
+	/**
+	 * Driver mode: the driver's bytes that its own stores to fixed offsets write (a driver's data
+	 * selector covers its code too). Only stores to a constant offset count, the way drivers patch
+	 * their code.
+	 */
+	private void findPatches(List<Function> functions, List<Fragment> fragments) {
+		long virt = currentProgram.getMinAddress().getOffset();
+		List<Instruction> all = new ArrayList<>();
+		for (Function f : functions) {
+			currentProgram.getListing().getInstructions(f.getBody(), true).forEach(all::add);
+		}
+		fragments.forEach(fr -> all.addAll(fr.body()));
+		for (Instruction ins : all) {
+			Map<Long, Long> constUniques = new HashMap<>();
+			for (PcodeOp op : ins.getPcode(false)) {
+				Varnode o = op.getOutput();
+				if (op.getOpcode() == PcodeOp.COPY && o != null && o.isUnique() && op.getInput(0).isConstant()) {
+					constUniques.put(o.getOffset(), op.getInput(0).getOffset());
+				}
+				// FS:[c] and GS:[c]: Ghidra adds its FS_OFFSET/GS_OFFSET register (the base is in wc_sb[])
+				if (op.getOpcode() == PcodeOp.INT_ADD && o != null && o.isUnique() && op.getInput(0).isRegister() &&
+						(op.getInput(0).getOffset() == 0x110 || op.getInput(0).getOffset() == 0x114) && op.getInput(1).isConstant()) {
+					constUniques.put(o.getOffset(), op.getInput(1).getOffset());
+				}
+				if (op.getOpcode() != PcodeOp.STORE) {
+					continue;
+				}
+				Varnode a = op.getInput(1);
+				Long off = a.isConstant() ? Long.valueOf(a.getOffset()) : a.isUnique() ? constUniques.get(a.getOffset()) : null;
+				if (off != null && off < currentProgram.getMemory().getSize()) {
+					for (int k = 0; k < op.getInput(2).getSize(); k++) {
+						patched.add(virt + off + k);
+					}
+				}
+			}
+		}
+		int n = 0;
+		for (Instruction ins : all) {
+			for (int k = 0; k < ins.getLength(); k++) {
+				if (patched.contains(ins.getAddress().getOffset() + k)) {
+					println("WcRecomp: driver " + driver + ": " + ins.getAddress() + " " + ins + " is patched at runtime");
+					n++;
+					break;
+				}
+			}
+		}
+		println("WcRecomp: driver " + driver + ": " + n + " instructions patched at runtime");
+	}
+
+	/** A constant of the instruction being translated that is in bytes the driver patches: read them
+	 * at runtime (from the code segment), else null. */
+	private String patchedConstant(Varnode v) {
+		if (driver == null || current == null || v.getSize() > 4) {
+			return null;
+		}
+		long at = current.getAddress().getOffset(), virt = currentProgram.getMinAddress().getOffset();
+		try {
+			byte[] b = current.getBytes();
+			for (int p = 0; p + v.getSize() <= b.length; p++) {
+				if (!patched.contains(at + p)) {
+					continue;
+				}
+				long value = 0;
+				for (int k = v.getSize() - 1; k >= 0; k--) {
+					value = value << 8 | (b[p + k] & 0xff);
+				}
+				if (value == (v.getOffset() & mask(v.getSize()))) {
+					return "mrd32(wc_sb[1] + 0x" + Long.toHexString(at + p - virt) + ", " + v.getSize() + ")";
+				}
+			}
+		}
+		catch (Exception e) {
+			// no bytes
+		}
+		return null;
+	}
+
+	/** 16 KB of code per file, so the build can work in parallel; a driver in one */
+	private StringBuilder fileFor(long entry, Map<String, StringBuilder> files) {
+		String file = driver != null ? "drv_" + driver + ".cpp" : String.format("seg_%05x.cpp", entry & ~0x3fffL);
+		return files.computeIfAbsent(file, k -> new StringBuilder());
+	}
+
+	/** A driver's tables: its instruction addresses and functions (for run()), the byte ranges its
+	 * instructions occupy and the captured image (the runtime recognises it by those bytes). */
+	private void writeDriverTables(Path out, TreeMap<Long, String> owner) throws Exception {
+		long virt = currentProgram.getMinAddress().getOffset();
+		StringBuilder t = new StringBuilder("/* Generated by WcRecomp.java: driver " + driver + ". */\n");
+		t.append("static const uint32_t addr[] = {\n");
+		for (long a : owner.keySet()) {
+			t.append("0x").append(Long.toHexString(a)).append(",\n");
+		}
+		t.append("};\nstatic void (*const func[])(uint32_t) = {\n");
+		for (String fn : owner.values()) {
+			t.append(fn).append(",\n");
+		}
+		t.append("};\nstatic const uint32_t ranges[][2] = {\n");
+		List<long[]> merged = new ArrayList<>();
+		// the instructions' bytes without those patched at runtime
+		TreeMap<Long, Integer> bytes = new TreeMap<>();
+		for (var e : codeBytes.entrySet()) {
+			for (long a = e.getKey(); a < e.getKey() + e.getValue(); a++) {
+				if (!patched.contains(a)) {
+					bytes.put(a, 1);
+				}
+			}
+		}
+		for (var e : bytes.entrySet()) {
+			long off = e.getKey() - virt, len = e.getValue();
+			long[] last = merged.isEmpty() ? null : merged.get(merged.size() - 1);
+			if (last != null && last[0] + last[1] >= off) {
+				last[1] = Math.max(last[1], off + len - last[0]);
+			}
+			else {
+				merged.add(new long[] { off, len });
+			}
+		}
+		for (long[] r : merged) {
+			t.append("{ 0x").append(Long.toHexString(r[0])).append(", 0x").append(Long.toHexString(r[1])).append(" },\n");
+		}
+		MemoryBlock block = currentProgram.getMemory().getBlocks()[0];
+		byte[] image = new byte[(int) block.getSize()];
+		block.getBytes(block.getStart(), image);
+		t.append("};\nstatic const uint8_t image[").append(image.length).append("] = {");
+		for (int i = 0; i < image.length; i++) {
+			t.append(i % 32 == 0 ? "\n" : "").append(image[i] & 0xff).append(',');
+		}
+		String var = "wc_drv_" + driver;
+		t.append("\n};\n\nextern const wc_driver ").append(var).append(";\nconst wc_driver ").append(var).append(" = { \"")
+				.append(driver).append("\", 0x").append(Long.toHexString(virt)).append(", ").append(image.length).append(", ")
+				.append(owner.size()).append(", addr, func, ").append(merged.size()).append(", ranges, image };\n");
+		writeIfChanged(out.resolve("drv_" + driver + "_tables.cpp"), withPrototypes(t.toString()));
 	}
 
 	/** Unchanged files keep their timestamps, so the C build only recompiles what changed. */
@@ -218,6 +371,7 @@ public class WcRecomp extends GhidraScript {
 		for (Instruction ins : body) {
 			labels.add(ins.getAddress().getOffset());
 			owner.putIfAbsent(ins.getAddress().getOffset(), fn);
+			codeBytes.put(ins.getAddress().getOffset(), ins.getLength());
 		}
 		Set<String> uniques = new TreeSet<>();
 		StringBuilder code = new StringBuilder();
@@ -245,6 +399,7 @@ public class WcRecomp extends GhidraScript {
 	private void emitInstruction(Instruction ins, Instruction next, Set<Long> labels, Set<String> uniques,
 			StringBuilder c) {
 		long at = ins.getAddress().getOffset();
+		current = ins;
 		c.append("L_").append(Long.toHexString(at)).append(": TRACE_INS(0x").append(Long.toHexString(at))
 				.append("); /* ").append(ins.getAddress()).append(" ").append(ins.toString().replace("*/", "* /"))
 				.append(" */\n");
@@ -437,7 +592,7 @@ public class WcRecomp extends GhidraScript {
 				long t = in[0].getAddress().getOffset();
 				String call = entries.containsKey(t) ? entries.get(t) + "(0x" + Long.toHexString(t) + ");"
 						: "run_code(0x" + Long.toHexString(t) + ");";
-				return "push_ret(0x" + Long.toHexString(at + ins.getLength()) + "); " + call + " pop_ret();";
+				return "push_ret(0x" + Long.toHexString(at + ins.getLength()) + "); " + call + " if (pop_ret()) return;";
 			}
 			case PcodeOp.CALLIND:
 				if (in[0].isUnique() && swiOutputs.contains(in[0].getOffset())) {
@@ -447,16 +602,18 @@ public class WcRecomp extends GhidraScript {
 					// "CALL FAR m16:32" calls the operand's address: load the far pointer from it
 					farJumpFixes++;
 					return "{ uint64_t fa = " + base(null, in[0]) + " + " + a + "; seg_load(1, mrd32(fa + 4, 2)); push_ret(0x" +
-						Long.toHexString(at + ins.getLength()) + "); run((uint32_t)mrd32(fa, 4)); pop_ret(); }";
+						Long.toHexString(at + ins.getLength()) + "); run((uint32_t)mrd32(fa, 4)); if (pop_ret()) return; }";
 				}
-				return "push_ret(0x" + Long.toHexString(at + ins.getLength()) + "); run((uint32_t)" + a + "); pop_ret();";
+				return "push_ret(0x" + Long.toHexString(at + ins.getLength()) + "); run((uint32_t)" + a + "); if (pop_ret()) return;";
 			case PcodeOp.RETURN:
+				// A return to somewhere other than after the C caller's call (an IRETD from a routine the
+				// interrupt handler called, a RET past a frame) unwinds to the frame that expects it.
 				if (ins.getMnemonicString().equals("IRET") || ins.getMnemonicString().equals("IRETD")) {
 					// Ghidra's IRET pops the flags into the flags word only; unpack them into CF, IF, ...
 					iretFixes++;
-					return "set_flags_word(rd(0x280, 2)); return;";
+					return "set_flags_word(rd(0x280, 2)); ret_to(code_addr(" + a + ")); return;";
 				}
-				return "return;";
+				return "ret_to(code_addr(" + a + ")); return;";
 			default:
 				unhandled++;
 				return "cpu_fail(\"unhandled p-code " + op.getMnemonic() + " at\", 0x" + Long.toHexString(at) + ");";
@@ -535,6 +692,9 @@ public class WcRecomp extends GhidraScript {
 
 	private String val(Varnode v, Set<String> uniques) {
 		int s = v.getSize();
+		if (v.isConstant() && patchedConstant(v) != null) {
+			return patchedConstant(v);
+		}
 		if (v.isConstant()) {
 			return "0x" + Long.toHexString(v.getOffset() & mask(s)) + "ULL";
 		}
