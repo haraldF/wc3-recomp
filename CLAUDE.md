@@ -82,6 +82,11 @@ generated and ignored.
   `WC_MOUSE=1 WC_KEYS=3000:+esc,3006:-esc,5000:+esc,5006:-esc,9000:@160.185,9300:@160.185,
   9400:+lmb,9500:-lmb` goes to Flight Control (a click held ~100 ticks: ticks are ~860 Hz here, and
   a 6-tick click was too short for the game's frame).
+- Loading a save (`00000000.WSG` + `WSG_NDX.WSG` in the folder's root; the callsign is in its PLYR
+  chunk): Flight Control's Main Terminal (180,40), the callsign + Enter, Duty Logs (60,155), the slot
+  (first at 75,52), Load (50,176): "GAME LOADED.", Return (255,176), Logoff (160,176). Scripted after
+  the Flight Control click above: `14000:@180.40,14400:+lmb,14500:-lmb`, letters from 17000 every 80
+  ticks (held 30), then 18900, 20900, 21900, 23900, 25400 for the clicks (checked on both clocks).
 
 ## Static recompilation (WcRecomp.java + runtime/)
 
