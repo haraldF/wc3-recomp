@@ -31,7 +31,9 @@ void mouse_post(int x, int y, int buttons) { post(x, y, buttons, 0); } /* WC_KEY
 void pc_mouse_move(int dx, int dy, int buttons) { if (buttons) pc_warp_end(); post(dx, dy, buttons, 1); }
 
 static int x, y = 100, min_x, max_x = 639, min_y, max_y = 199;
-static int virt_w = 640, virt_h = 200; /* what the window's 320x200 covers */
+/* What the window's 320x200 covers: the last range set from 0 (WC3 sets 0..1278 in flight, 0..640
+ * in the options screen); a range starting further in only confines the pointer. */
+static int virt_w = 640, virt_h = 200;
 static uint8_t buttons;     /* held now */
 static uint8_t clicked;     /* pressed since the program last read the buttons (so short clicks count) */
 /* A click shorter than this (a trackpad tap, a browser's synthetic click) is reported as held this
@@ -254,13 +256,13 @@ void mouse_int(uint32_t at)
 	case 0x07: /* horizontal range */
 		min_x = (int16_t)(cx < dx ? cx : dx);
 		max_x = (int16_t)(cx < dx ? dx : cx);
-		if (max_x + 1 > virt_w) virt_w = max_x + 1;
+		if (min_x <= 0 && max_x > 0) virt_w = max_x + 1;
 		x = clamp(x, min_x, max_x);
 		break;
 	case 0x08: /* vertical range */
 		min_y = (int16_t)(cx < dx ? cx : dx);
 		max_y = (int16_t)(cx < dx ? dx : cx);
-		if (max_y + 1 > virt_h) virt_h = max_y + 1;
+		if (min_y <= 0 && max_y > 0) virt_h = max_y + 1;
 		y = clamp(y, min_y, max_y);
 		break;
 	case 0x0b: /* motion counters */

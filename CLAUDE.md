@@ -39,6 +39,9 @@ generated and ignored.
   reports (150Dh: drive numbers, A: = 0).
 - It writes into the game folder: test with a scratch copy (`WC3/` copied, `DATA.DAT` and
   `OBJECTS.TRE` linked), passed as `--iso copy/DATA.DAT`.
+- The stick steers only with "joystick" ticked under control in the flight options (Alt-O; `save`
+  keeps it): with "mouse" (the user's config) the game ignores it. Scripted: Alt-O, click (48,63),
+  exit (183,152), then `%x.y` (checked: the ship turns, the pilot's hand moves).
 - With a joystick present (ours is while the host has a controller; `WC_JOYSTICK=1` always, `=0`
   never) and no `WC3\JOY0.DAT`, it calibrates in text mode: the prompts (centre, top left, bottom
   right, each + a button, then Esc) go to the terminal between endless "Joystick val (x, y)" lines;
@@ -90,7 +93,9 @@ generated and ignored.
   code it copies to a 2-paragraph block: it stores BX, CX, DX at its offsets 0, 2, 4, and the game
   polls them (ca448), never AX=3. `mouse.cpp` runs such handlers with a small 16-bit interpreter
   (push/pop, mov/xor, prefixes, RETF; it reports anything else) whenever the state changes. The
-  game sets the range to 640x480, so the window covers the largest range set (WC1: 640x200).
+  game sets the range to 640x480, but 0..1278 in flight (two units a pixel): the window covers the
+  last range set from 0 (one starting further in only confines the pointer). Keeping the largest
+  made the options screen (Alt-O, 0..640) put the pointer at twice the x.
 - Hangar (Esc twice): hotspots show a label at the bottom when hovered ("Go to FLIGHT CONTROL." along
   the bottom edge, y 185 of 200); Alt-X asks "Exit to DOS (Y/N)?".
   `WC_MOUSE=1 WC_KEYS=3000:+esc,3006:-esc,5000:+esc,5006:-esc,9000:@160.185,9300:@160.185,
