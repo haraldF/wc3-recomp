@@ -1,5 +1,6 @@
 /* The mouse driver (INT 33h), fed from the host's window. Positions are in the driver's virtual
- * screen, which in mode 13h is 640x200 (x doubled), like Microsoft's driver. */
+ * screen, which in mode 13h is 640x200 (x doubled), like Microsoft's driver; the window covers it,
+ * or the largest range the program has set (Wing Commander III sets 640x480). */
 #include <atomic>
 #include <cstdio>
 
@@ -29,6 +30,7 @@ void pc_mouse(int x, int y, int buttons) { if (buttons) pc_warp_end(); post(x, y
 void pc_mouse_move(int dx, int dy, int buttons) { if (buttons) pc_warp_end(); post(dx, dy, buttons, 1); }
 
 static int x, y = 100, min_x, max_x = 639, min_y, max_y = 199;
+static int virt_w = 640, virt_h = 200; /* what the window's 320x200 covers */
 static uint8_t buttons;     /* held now */
 static uint8_t clicked;     /* pressed since the program last read the buttons (so short clicks count) */
 /* A click shorter than this (a trackpad tap, a browser's synthetic click) is reported as held this
@@ -58,13 +60,88 @@ static int visible = -1;     /* cursor shown when >= 0; this driver draws none (
 
 static int clamp(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
 
+/* The event handler (AX=0Ch): real-mode code at seg:off, called for the events in its mask (bit 0
+ * movement, 1/2 left pressed/released, 3/4 right, 5/6 middle). Nothing else runs in real mode here,
+ * so a small interpreter runs it: Wing Commander III's only stores BX, CX and DX in its segment for
+ * the game to read. It is called as the state the program would see changes (mouse_poll), with
+ * short clicks held as long as for AX=3, since the game only looks at the last state. */
+static uint16_t handler_seg, handler_off, handler_mask;
+static int handler_x, handler_y, handler_buttons = -1; /* what the handler was last told */
+
+static int real_call(uint16_t cs, uint16_t ip, uint16_t r[8]) /* AX CX DX BX SP BP SI DI; 0 if not run */
+{
+	uint16_t stack[64];
+	unsigned sp = 64;
+	uint16_t ds = cs, es = cs;
+	for (int steps = 0; steps < 1000; steps++) {
+		uint16_t seg = ds;
+		uint8_t op;
+		for (;;) { /* prefixes */
+			op = M[cs * 16u + ip++];
+			if (op == 0x2e) seg = cs;
+			else if (op == 0x26) seg = es;
+			else if (op == 0x36 || op == 0x3e) seg = ds; /* SS is ours: the same as DS here */
+			else break;
+		}
+		if (op >= 0x50 && op <= 0x57) {
+			if (!sp) return 0;
+			stack[--sp] = r[op & 7];
+			continue;
+		}
+		if (op >= 0x58 && op <= 0x5f) {
+			if (sp == 64) return 0;
+			r[op & 7] = stack[sp++];
+			continue;
+		}
+		if (op >= 0xb8 && op <= 0xbf) {
+			r[op & 7] = (uint16_t)(M[cs * 16u + ip] | M[cs * 16u + ip + 1] << 8);
+			ip += 2;
+			continue;
+		}
+		if (op == 0xcb) return 1; /* RETF: back to the driver */
+		if (op != 0x89 && op != 0x8b && op != 0x31 && op != 0x33) break;
+		uint8_t modrm = M[cs * 16u + ip++];
+		int mod = modrm >> 6, reg = modrm >> 3 & 7, rm = modrm & 7;
+		if (mod == 3) {
+			uint16_t &dst = op & 2 ? r[reg] : r[rm], src = op & 2 ? r[rm] : r[reg];
+			dst = op == 0x89 || op == 0x8b ? src : dst ^ src;
+			continue;
+		}
+		if (op != 0x89 && op != 0x8b) break;
+		static const int8_t base[8][2] = { { 3, 6 }, { 3, 7 }, { 5, 6 }, { 5, 7 }, { 6, -1 }, { 7, -1 }, { 5, -1 }, { 3, -1 } };
+		uint16_t ea;
+		if (mod == 0 && rm == 6) {
+			ea = (uint16_t)(M[cs * 16u + ip] | M[cs * 16u + ip + 1] << 8);
+			ip += 2;
+		}
+		else {
+			ea = r[base[rm][0]] + (base[rm][1] >= 0 ? r[base[rm][1]] : 0);
+			if (mod == 1) ea += (uint16_t)(int8_t)M[cs * 16u + ip++];
+			if (mod == 2) {
+				ea += (uint16_t)(M[cs * 16u + ip] | M[cs * 16u + ip + 1] << 8);
+				ip += 2;
+			}
+		}
+		uint32_t a = seg * 16u + ea;
+		if (op == 0x89) {
+			M[a] = (uint8_t)r[reg];
+			M[a + 1] = (uint8_t)(r[reg] >> 8);
+		}
+		else r[reg] = (uint16_t)(M[a] | M[a + 1] << 8);
+	}
+	fprintf(stderr, "wc: the mouse event handler at %04x:%04x does more than this driver can run: not called\n",
+		handler_seg, handler_off);
+	return 0;
+}
+
 /* Apply the host's events (called before every INT 33h service). */
 static void drain(void)
 {
 	uint32_t head = events_head.load(std::memory_order_relaxed);
 	while (head != events_tail.load(std::memory_order_acquire)) {
 		int ex = events[head % 256].x, ey = events[head % 256].y;
-		int nx = events[head % 256].relative ? x + ex * 2 : ex * 2, ny = events[head % 256].relative ? y + ey : ey;
+		int sx = ex * virt_w / 320, sy = ey * virt_h / 200;
+		int nx = events[head % 256].relative ? x + sx : sx, ny = events[head % 256].relative ? y + sy : sy;
 		nx = clamp(nx, min_x, max_x);
 		ny = clamp(ny, min_y, max_y);
 		uint8_t nb = events[head % 256].buttons;
@@ -95,6 +172,31 @@ static void drain(void)
 	events_head.store(head, std::memory_order_release);
 }
 
+/* Tell the event handler about changes (called often, from the device poll). */
+void mouse_poll(void)
+{
+	if (!handler_mask) return;
+	drain();
+	uint8_t b = (uint8_t)(reported_buttons() & ~clicked) | buttons;
+	uint16_t events = 0;
+	if (x != handler_x || y != handler_y) events |= 1;
+	if (handler_buttons >= 0) {
+		for (int i = 0; i < 3; i++) {
+			int was = handler_buttons >> i & 1, now = b >> i & 1;
+			if (now && !was) events |= (uint16_t)(2 << (2 * i));
+			if (!now && was) events |= (uint16_t)(4 << (2 * i));
+		}
+	}
+	else events |= 1;
+	handler_x = x;
+	handler_y = y;
+	handler_buttons = b;
+	if (!(events & handler_mask)) return;
+	uint16_t r[8] = { (uint16_t)(events & handler_mask), (uint16_t)x, (uint16_t)y, b, 0, 0,
+		(uint16_t)mickey_x, (uint16_t)mickey_y };
+	if (!real_call(handler_seg, handler_off, r)) handler_mask = 0;
+}
+
 void mouse_int(uint32_t at)
 {
 	uint16_t ax = (uint16_t)rd(R_AX, 2), bx = (uint16_t)rd(R_BX, 2), cx = (uint16_t)rd(R_CX, 2),
@@ -114,6 +216,7 @@ void mouse_int(uint32_t at)
 		x = clamp(x, min_x, max_x);
 		y = clamp(y, min_y, max_y);
 		visible = -1;
+		handler_mask = 0;
 		wr(R_AX, 2, 0xffff);
 		wr(R_BX, 2, 2);
 		break;
@@ -150,17 +253,25 @@ void mouse_int(uint32_t at)
 	case 0x07: /* horizontal range */
 		min_x = (int16_t)(cx < dx ? cx : dx);
 		max_x = (int16_t)(cx < dx ? dx : cx);
+		if (max_x + 1 > virt_w) virt_w = max_x + 1;
 		x = clamp(x, min_x, max_x);
 		break;
 	case 0x08: /* vertical range */
 		min_y = (int16_t)(cx < dx ? cx : dx);
 		max_y = (int16_t)(cx < dx ? dx : cx);
+		if (max_y + 1 > virt_h) virt_h = max_y + 1;
 		y = clamp(y, min_y, max_y);
 		break;
 	case 0x0b: /* motion counters */
 		wr(R_CX, 2, (uint16_t)mickey_x);
 		wr(R_DX, 2, (uint16_t)mickey_y);
 		mickey_x = mickey_y = 0;
+		break;
+	case 0x0c: /* event handler: ES:DX for the events in CX */
+		handler_seg = (uint16_t)rd(R_ES, 2);
+		handler_off = dx;
+		handler_mask = cx & 0x7f;
+		handler_buttons = -1;
 		break;
 	case 0x24: /* driver version 8.0, PS/2 mouse */
 		wr(R_BX, 2, 0x0800);

@@ -23,6 +23,7 @@ uint64_t mt32_in(uint64_t port);
 void mt32_out(uint64_t port, uint64_t value);
 void mt32_poll(uint64_t now);
 void mt32_init(void);
+void gm_poll(uint64_t now);
 int sb_port(uint64_t port);
 uint64_t sb_in(uint64_t port);
 void sb_out(uint64_t port, uint64_t value);
@@ -35,6 +36,7 @@ void flat32_int(uint64_t n, uint32_t at, uint32_t next);
 static void bios_work(uint8_t n, uint32_t at);
 void ems_init(void);
 uint8_t joystick_in(void);
+void mouse_poll(void);
 void joystick_out(void);
 int joystick_busy(void);
 void vga_out(uint64_t port, uint64_t value);
@@ -454,7 +456,9 @@ static void poll_devices(void)
 		vga_poll(now);
 		opl_poll(now);
 		mt32_poll(now);
+		gm_poll(now);
 		sb_poll(now); /* after the sound up to now: a block's end raises its interrupt */
+		mouse_poll();
 	}
 }
 

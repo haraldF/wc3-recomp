@@ -1,7 +1,7 @@
 /* An MPU-401 at ports 330h (data) and 331h (status, commands), as GOG's WC3.CFG expects (General
  * MIDI there; WC_MPU=0: no card). Its MIDI goes to a Roland MT-32, munt's libmt32emu
  * (third_party/munt, LGPL 2.1+), with WC_MT32=folder holding the ROM images (or its subfolders);
- * without it nowhere yet (no General MIDI synth).
+ * without it to the General MIDI synth (gm.cpp).
  * WC_MT32_MACHINE picks the model (munt's names: mt32_1_07, cm32l_1_02, ...), else the first one
  * the folder has ROMs for, in the order below. Samples are made like the AdLib's (opl.cpp). */
 #include <dirent.h>
@@ -18,6 +18,9 @@ uint64_t pc_now_ns(void);
 int pc_warping(void);
 int sound_open(unsigned rate);
 void sound_out(int16_t *frames, unsigned count, uint64_t t0);
+int gm_active(void);
+void gm_midi(uint8_t v);
+void gm_init(void);
 
 /* the game was made for the first MT-32s; the CM-32L adds sound effects it may not use */
 static const char *const machines[] = {
@@ -34,9 +37,10 @@ static int uart;             /* UART mode: data bytes are plain MIDI */
 static uint8_t replies[8];   /* what the MPU-401 has for the program to read at 330h */
 static unsigned replies_len;
 
+/* The MPU-401's synth (MT-32 or General MIDI) has the sound output. */
 int mt32_active(void)
 {
-	return synth != NULL;
+	return synth != NULL || gm_active();
 }
 
 /* Make the samples from where we left off up to now, as opl_poll does. The synth runs even when
@@ -80,6 +84,7 @@ void mt32_out(uint64_t port, uint64_t value)
 			mt32_poll(pc_now_ns()); /* the sound up to this moment, before the message */
 			mt32emu_parse_stream(synth, &v, 1);
 		}
+		else gm_midi(v);
 		return;
 	}
 	if (wc_trace) fprintf(stderr, "wc: MPU-401 command %02x\n", v);
@@ -123,7 +128,11 @@ void mt32_init(void)
 	const char *off = getenv("WC_MPU");
 	mpu = !off || strcmp(off, "0");
 	const char *dir = getenv("WC_MT32");
-	if (!mpu || !dir || !*dir) return;
+	if (!mpu) return;
+	if (!dir || !*dir) {
+		gm_init();
+		return;
+	}
 	const char *only = getenv("WC_MT32_MACHINE");
 	for (size_t i = 0; i < sizeof machines / sizeof *machines && !synth; i++) {
 		const char *machine = only && *only ? only : machines[i];

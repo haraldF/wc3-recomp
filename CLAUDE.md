@@ -61,7 +61,27 @@ generated and ignored.
 - The video DLL (MCGA.DLL) finds the CRT controller by reading the Miscellaneous Output register
   (3CCh, bit 0); without it, it waited for a retrace on 3BAh forever.
 - The digital driver needs a Sound Blaster 16 (41h rate, Bxh/Cxh transfers, DMA channel 5): the
-  intro's movie waits for its sound blocks.
+  intro's movie waits for its sound blocks. It never sends D1h (speaker on): an SB16's output is
+  always on, and the runtime muted it, so blocks played silently (check with `WC_WAV`, not by DSP
+  activity: the intro was taken for audible since its blocks ran). The mixer (d6, 16002431) takes
+  its source with `LDS ESI,[ESI+8]`, which the generator read through SS (see below): it mixed the
+  interrupt table into the DMA buffer (32000h).
+- Music: General MIDI to the MPU-401 (the intro's sound is all digital; the hangar has music).
+  Without `WC_MT32` the MIDI goes to macOS's own General MIDI synth (`gm.cpp`: AudioToolbox's DLS
+  synth, rendered on the emulation thread with AudioUnitRender, no output unit, 44.1 kHz float
+  non-interleaved; `WC_GM=0` off), which then has the output the Sound Blaster mixes into. Hangar
+  music peaks ~3000 alone (`WC_SB=0`), ~7500 with the SB's sound. No General MIDI in the web build
+  yet (`gm.cpp` is empty there).
+- Mouse: the game installs an event handler (INT 33h AX=0Ch through 2511h, mask 7Fh), real-mode
+  code it copies to a 2-paragraph block: it stores BX, CX, DX at its offsets 0, 2, 4, and the game
+  polls them (ca448), never AX=3. `mouse.cpp` runs such handlers with a small 16-bit interpreter
+  (push/pop, mov/xor, prefixes, RETF; it reports anything else) whenever the state changes. The
+  game sets the range to 640x480, so the window covers the largest range set (WC1: 640x200).
+- Hangar (Esc twice): hotspots show a label at the bottom when hovered ("Go to FLIGHT CONTROL." along
+  the bottom edge, y 185 of 200); Alt-X asks "Exit to DOS (Y/N)?".
+  `WC_MOUSE=1 WC_KEYS=3000:+esc,3006:-esc,5000:+esc,5006:-esc,9000:@160.185,9300:@160.185,
+  9400:+lmb,9500:-lmb` goes to Flight Control (a click held ~100 ticks: ticks are ~860 Hz here, and
+  a 6-tick click was too short for the game's frame).
 
 ## Static recompilation (WcRecomp.java + runtime/)
 
@@ -70,7 +90,9 @@ generated and ignored.
   (`run()` = `run_code()`).
 - Ghidra ignores segments in 32-bit code. The generator adds `wc_sb[n]` (the base of ES, CS, SS, DS,
   FS, GS's selector): SS for stack p-code (an 8-byte space constant), ES for the EDI side of string
-  instructions, else the prefix's segment or DS. Segment register writes go through `seg_load()`.
+  instructions, else the prefix's segment or DS. LDS/LES/LFS/LGS/LSS load their far pointer through
+  an 8-byte space constant too but are ordinary operands (21 of them were read through SS; harmless
+  in the program, where SS = DS, not in drivers with their own DS). Segment register writes go through `seg_load()`.
 - `CALLF`/`JMPF m16:32` (far through memory) are modelled as near; the generator loads the far
   pointer (23 fixes). `IRETD` like `IRET`: `set_flags_word()`.
 - `LSL r32` keeps only the limit's low word in Ghidra's model (`Reg32 = zext(tmp:2)`): the C
@@ -150,10 +172,9 @@ generated and ignored.
 
 ## State
 
-With `WC_JOYSTICK=0`: the HMI drivers and MCGA.DLL recompiled, the intro starts (the first
-pictures of space, drawn in mode 13h) and plays its sound on the SB16. Not looked at yet: the
-joystick (`joystick.cpp` is how WC1 reads it), General MIDI, the web page (`web/` is still
-wc-decomp's).
+The intro and credits play with their digital sound on the SB16; Esc twice reaches the hangar,
+where the mouse works (hotspots, Flight Control), with General MIDI music on macOS. Missing: text
+mode in the window, General MIDI in the browser, the web page (`web/` is still wc-decomp's).
 
 ## Conventions
 

@@ -9,7 +9,7 @@ game's files found on the CD image) up to the first call into a driver the game 
 nothing is drawn yet.
 
 It grew out of wc-decomp, the same for Wing Commander I and II (16-bit real-mode programs): the
-PC emulation (`runtime/`: DOS, BIOS, timer, keyboard, mouse, VGA, AdLib, MT-32, Sound Blaster, the
+PC emulation (`runtime/`: DOS, BIOS, timer, keyboard, mouse, VGA, AdLib, MT-32, General MIDI, Sound Blaster, the
 window) comes from there, and the generator is its flat 32-bit mode.
 
 ## Building it yourself

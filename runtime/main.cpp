@@ -11,8 +11,9 @@
  *   WC_HEADLESS=1   no window (keys from the terminal or WC_KEYS)
  *   WC_MOUSE=1      report a mouse without a window (for WC_KEYS mouse entries)
  *   WC_MOUSE_SPEED=x  the mouse's speed in full screen (default 2; Cmd+Left/Right in the window)
- *   WC_WAV=file     record the sound (AdLib or MT-32, with the Sound Blaster's) to a WAV file
+ *   WC_WAV=file     record the sound (AdLib, MT-32 or General MIDI, with the Sound Blaster's) to a WAV file
  *   WC_SB=0         no Sound Blaster (by default one at 220h, IRQ 5, DMA 1)
+ *   WC_GM=0         no General MIDI synth (macOS's, behind the MPU-401 when there is no WC_MT32)
  *   WC_CYCLES=n     instructions per millisecond ("max": unlimited; Cmd+Up/Down in the window)
  *   WC_FPS=n        frames per second in space flight, where frames are paced instead (default 15; 0: off;
  *                   Cmd+Up/Down in flight)

@@ -3,7 +3,8 @@
  * 00h-0Fh, 4-7 at C0h-DEh, and the page registers). DSP 4.05: reset (2x6h, then AAh at 2xAh), the
  * original 8-bit mono output in single-cycle (14h), auto-initialize (1Ch) and direct (10h) mode at
  * the rate of a time constant (40h); the SB16's 8- and 16-bit transfers (Cxh, Bxh: mono or stereo,
- * signed or not, single-cycle or auto-initialize) at the rate of 41h; speaker, pause, version; the
+ * signed or not, single-cycle or auto-initialize) at the rate of 41h; speaker (on an SB16 only its
+ * status: the output is always on, and Wing Commander III never turns it on), pause, version; the
  * mixer's IRQ and DMA settings. A block plays in emulated time, its end raises the IRQ
  * (acknowledged at 2xEh for 8-bit, 2xFh for 16-bit), and sound.cpp mixes the samples into whatever
  * has the output (AdLib or MT-32), by time: sb_mix. WC_SB=0 removes the card. The FM chip of the
@@ -382,7 +383,7 @@ static int unit_sample(uint32_t i)
 /* The sample of channel ch (0 left, 1 right) at time t, linearly between the DMA's frames. */
 static int sample_at(uint64_t t, int ch)
 {
-	if (!playing || paused || t < start_ns || !speaker) return speaker ? direct : 0;
+	if (!playing || paused || t < start_ns) return direct;
 	if (ctrl[channel / 4].mask & (1 << (channel & 3))) return 0;
 	int n = stereo ? 2 : 1;
 	uint64_t pos = (t - start_ns) * rate * 256u / 1000000000u; /* in 1/256 frames */

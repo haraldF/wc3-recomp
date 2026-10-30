@@ -54,6 +54,8 @@ public class WcRecomp extends GhidraScript {
 	private int override = -1;
 	/** whether the instruction's memory operand is based on EBP or ESP, so in SS by default */
 	private boolean stackBased;
+	/** Per instruction: LDS/LES/LFS/LGS/LSS, whose far pointer Ghidra loads like a stack access. */
+	private boolean farLoad;
 	private boolean stringOp;
 	private final Set<Long> ediUniques = new HashSet<>();
 
@@ -428,6 +430,7 @@ public class WcRecomp extends GhidraScript {
 		}
 		override = segmentOverride(ins);
 		stackBased = STACK_BASED.matcher(ins.toString()).find();
+		farLoad = FAR_LOADS.contains(ins.getMnemonicString());
 		stringOp = STRING_OPS.contains(ins.getMnemonicString().replaceAll("\\..*", ""));
 		ediUniques.clear();
 		loadAddrOf.clear();
@@ -650,9 +653,11 @@ public class WcRecomp extends GhidraScript {
 	 * stack accesses (PUSH, POP, CALL, RET: an 8-byte space constant) use SS, string instructions
 	 * write (and SCAS/CMPS read) ES:EDI, otherwise the prefix's segment, or SS for an operand based on
 	 * EBP or ESP (the C library's far copy loads DS with LDS, then reads its arguments), or DS.
+	 * LDS and its kin load through an 8-byte space constant too, but their operand is an ordinary one:
+	 * read through SS, the sound mixer's source pointer came from its caller's stack segment.
 	 */
 	private String base(Varnode space, Varnode addr) {
-		if (space != null && space.isConstant() && space.getSize() == 8) {
+		if (space != null && space.isConstant() && space.getSize() == 8 && !farLoad) {
 			return "wc_sb[2]";
 		}
 		if (stringOp && addr != null && (addr.isUnique() && ediUniques.contains(addr.getOffset()) ||
@@ -759,6 +764,7 @@ public class WcRecomp extends GhidraScript {
 		return sb.append("\n").append(body).toString();
 	}
 
+	private static final Set<String> FAR_LOADS = Set.of("LDS", "LES", "LFS", "LGS", "LSS");
 	private static final Pattern STACK_BASED = Pattern.compile("\\[E[BS]P[\\] ]");
 	private static final Pattern FUNCTION_NAME = Pattern.compile("\\bF_[0-9a-f]+\\b");
 
