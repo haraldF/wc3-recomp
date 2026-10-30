@@ -1,13 +1,18 @@
 /* VGA: the DAC (palette), the status register's blanking and retrace bits in real time, and the
- * frames the host shows, copied from the mode 13h frame buffer at each vertical retrace. */
+ * frames the host shows, copied from the frame buffer at each vertical retrace: mode 13h, or the
+ * VESA (VBE 1.2) mode 101h, 640x480 with 256 colours, banked through the 64 KB window at A0000h
+ * (Wing Commander III's VESA480.DLL; without it, MCGA.DLL at 320x200). WC_VESA=0: no VESA BIOS. */
 #include <pthread.h>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 #include "host.h"
 #include "wc_rt.h"
 
 uint64_t pc_now_ns(void);
 int pc_warping(void);
+int pc_script_warp(void);
 void pc_warp_end(void);
 
 /* ---- DAC: index at 3C8h (write) / 3C7h (read), then R, G, B (6 bits) at 3C9h ---- */
@@ -47,10 +52,40 @@ static uint8_t status(void)
 	return v;
 }
 
+/* ---- VESA: video memory beyond the window ---- */
+
+enum { VRAM = 512 * 1024, BANK = 64 * 1024 };
+static uint8_t vram[VRAM];
+static int svga;        /* in mode 101h */
+static unsigned bank;   /* the bank in the window at A0000h */
+static uint32_t display_start; /* where the picture starts in video memory (4F07h) */
+
+/* The window's contents go back to video memory (the program wrote them there). */
+static void bank_flush(void)
+{
+	memcpy(vram + bank * BANK, M + 0xa0000, BANK);
+}
+
+static void bank_set(unsigned b)
+{
+	if (b >= VRAM / BANK || b == bank) return;
+	bank_flush();
+	bank = b;
+	memcpy(M + 0xa0000, vram + bank * BANK, BANK);
+}
+
+/* The VESA window function (the mode's WinFuncPtr, F000:0100): BH 0 set the bank to DX, 1 get it. */
+void vga_window_function(void)
+{
+	if ((rd(R_BX, 2) >> 8) == 0) bank_set((unsigned)rd(R_DX, 2));
+	else wr(R_DX, 2, bank);
+}
+
 /* ---- frames for the host ---- */
 
 static pthread_mutex_t frame_lock = PTHREAD_MUTEX_INITIALIZER;
-static uint8_t frame_pixels[320 * 200], frame_palette[256 * 3];
+static uint8_t frame_pixels[640 * 480], frame_palette[256 * 3];
+static int frame_w = 320, frame_h = 200;
 static uint64_t frame_count, frame_taken;
 
 /* Called regularly on the emulation's thread: at each retrace, copy the picture for the host. */
@@ -60,12 +95,22 @@ void vga_poll(uint64_t now)
 	if (frame == frame_taken) return;
 	frame_taken = frame;
 	pthread_mutex_lock(&frame_lock);
-	memcpy(frame_pixels, M + 0xa0000, sizeof frame_pixels);
+	if (svga) {
+		bank_flush();
+		frame_w = 640;
+		frame_h = 480;
+		memcpy(frame_pixels, vram + display_start, 640 * 480);
+	}
+	else {
+		frame_w = 320;
+		frame_h = 200;
+		memcpy(frame_pixels, M + 0xa0000, 320 * 200);
+	}
 	memcpy(frame_palette, wc_palette, sizeof frame_palette);
 	frame_count++;
 	pthread_mutex_unlock(&frame_lock);
-	if (pc_warping()) { /* the quick start ends with the first visible picture */
-		for (int i = 0; i < 320 * 200; i++) {
+	if (pc_warping() && !pc_script_warp()) { /* the quick start ends with the first visible picture */
+		for (int i = 0; i < frame_w * frame_h; i++) {
 			const uint8_t *c = frame_palette + 3 * frame_pixels[i];
 			if (c[0] | c[1] | c[2]) {
 				pc_warp_end();
@@ -75,10 +120,12 @@ void vga_poll(uint64_t now)
 	}
 }
 
-uint64_t vga_frame(uint8_t pixels[320 * 200], uint8_t palette[256 * 3])
+uint64_t vga_frame(uint8_t pixels[640 * 480], uint8_t palette[256 * 3], int *w, int *h)
 {
 	pthread_mutex_lock(&frame_lock);
-	memcpy(pixels, frame_pixels, sizeof frame_pixels);
+	*w = frame_w;
+	*h = frame_h;
+	memcpy(pixels, frame_pixels, (size_t)frame_w * frame_h);
 	memcpy(palette, frame_palette, sizeof frame_palette);
 	uint64_t n = frame_count;
 	pthread_mutex_unlock(&frame_lock);
@@ -125,14 +172,139 @@ void vga_init(void)
 
 /* ---- video BIOS (INT 10h): modes and the DAC; text output is not shown ---- */
 
+/* The picture as it is now (for WC_SCREENSHOT): width and height, pixels into buf (640x480 bytes). */
+int vga_picture(uint8_t *buf, int *w, int *h)
+{
+	if (svga) {
+		bank_flush();
+		memcpy(buf, vram + display_start, 640 * 480);
+		*w = 640;
+		*h = 480;
+	}
+	else {
+		memcpy(buf, M + 0xa0000, 320 * 200);
+		*w = 320;
+		*h = 200;
+	}
+	return 1;
+}
+
+void vga_bios(uint32_t at);
+extern int dos_real; /* called through Phar Lap's real-mode interrupt (2511h): ES is a segment */
+
+/* VESA BIOS (VBE 1.2): mode 101h only. Its strings and mode list live in the BIOS segment. */
+enum { VESA_OEM = 0xf000, VESA_MODES = 0xf020, VESA_WINFUNC = 0x0100 };
+
+static void vesa(uint32_t at)
+{
+	uint8_t al = (uint8_t)rd(R_AL, 1);
+	uint32_t buf = dos_real ? (uint32_t)rd(R_ES, 2) * 16 + (uint32_t)rd(R_DI, 2) : wc_sb[0] + (uint32_t)rd(R_DI, 4);
+	const char *off = getenv("WC_VESA");
+	if (off && !strcmp(off, "0")) {
+		wr(R_AX, 2, 0x014f); /* failed */
+		return;
+	}
+	wr(R_AX, 2, 0x004f);
+	switch (al) {
+	case 0x00: { /* controller information into ES:DI */
+		static const char oem[] = "wc3-recomp VBE";
+		memcpy(M + 0xf0000 + VESA_OEM, oem, sizeof oem);
+		mwr(0xf0000 + VESA_MODES, 2, 0x101);
+		mwr(0xf0000 + VESA_MODES + 2, 2, 0xffff);
+		memset(M + buf, 0, 256);
+		memcpy(M + buf, "VESA", 4);
+		mwr(buf + 4, 2, 0x0102);
+		mwr(buf + 6, 4, 0xf0000000u | VESA_OEM);
+		mwr(buf + 10, 4, 0);                        /* capabilities: a 6-bit DAC */
+		mwr(buf + 14, 4, 0xf0000000u | VESA_MODES);
+		mwr(buf + 18, 2, VRAM / BANK);              /* memory in 64 KB blocks */
+		break;
+	}
+	case 0x01: { /* mode information into ES:DI */
+		if ((rd(R_CX, 2) & 0x1ff) != 0x101) {
+			wr(R_AX, 2, 0x014f);
+			break;
+		}
+		memset(M + buf, 0, 256);
+		mwr(buf + 0, 2, 0x001b);  /* supported, extended information, colour, graphics */
+		M[buf + 2] = 7;           /* window A: there, readable, writable */
+		M[buf + 3] = 0;           /* no window B */
+		mwr(buf + 4, 2, 64);      /* granularity and size in KB */
+		mwr(buf + 6, 2, 64);
+		mwr(buf + 8, 2, 0xa000);  /* window A's segment */
+		mwr(buf + 12, 4, 0xf0000000u | VESA_WINFUNC);
+		mwr(buf + 16, 2, 640);    /* bytes per line */
+		mwr(buf + 18, 2, 640);
+		mwr(buf + 20, 2, 480);
+		M[buf + 22] = 8;          /* character cell */
+		M[buf + 23] = 16;
+		M[buf + 24] = 1;          /* planes */
+		M[buf + 25] = 8;          /* bits per pixel */
+		M[buf + 26] = 1;          /* banks */
+		M[buf + 27] = 4;          /* packed pixel */
+		M[buf + 29] = 0;          /* image pages - 1 */
+		M[buf + 30] = 1;
+		break;
+	}
+	case 0x02: { /* set mode BX (bit 15: keep the memory) */
+		uint16_t mode = (uint16_t)rd(R_BX, 2);
+		if ((mode & 0x1ff) != 0x101) {
+			if (mode < 0x100) {
+				wr(R_AX, 2, mode & 0xff);
+				svga = 0;
+				vga_bios(at);
+				wr(R_AX, 2, 0x004f);
+			}
+			else wr(R_AX, 2, 0x014f);
+			break;
+		}
+		svga = 1;
+		bank = 0;
+		display_start = 0;
+		if (!(mode & 0x8000)) {
+			memset(vram, 0, sizeof vram);
+			memset(M + 0xa0000, 0, BANK);
+		}
+		M[0x449] = 0x13; /* what get mode reports: a graphics mode */
+		break;
+	}
+	case 0x03: /* current mode */
+		wr(R_BX, 2, svga ? 0x101 : M[0x449]);
+		break;
+	case 0x05: /* the window's bank */
+		vga_window_function();
+		break;
+	case 0x07: /* display start: BL 0 set to pixel CX of line DX, 1 get */
+		if ((rd(R_BX, 1)) == 0 || rd(R_BX, 1) == 0x80) {
+			uint32_t start = (uint32_t)rd(R_DX, 2) * 640 + (uint32_t)rd(R_CX, 2);
+			display_start = start + 640 * 480 <= VRAM ? start : 0;
+		}
+		else if (rd(R_BX, 1) == 1) {
+			wr(R_BX, 2, 0);
+			wr(R_CX, 2, display_start % 640);
+			wr(R_DX, 2, display_start / 640);
+		}
+		break;
+	default:
+		wr(R_AX, 2, 0x014f);
+		break;
+	}
+	if (wc_trace) fprintf(stderr, "wc: VESA AX=4f%02x BX=%04llx CX=%04llx DX=%04llx -> AX=%04llx at %05x\n", al,
+		rd(R_BX, 2), rd(R_CX, 2), rd(R_DX, 2), rd(R_AX, 2), at);
+}
+
 void vga_bios(uint32_t at)
 {
 	uint8_t ah = (uint8_t)rd(R_AH, 1), al = (uint8_t)rd(R_AL, 1);
 	uint16_t bx = (uint16_t)rd(R_BX, 2), cx = (uint16_t)rd(R_CX, 2), dx = (uint16_t)rd(R_DX, 2);
 	uint32_t table = wc_sb[0] + (uint32_t)rd(R_DX, 4); /* ES:EDX, in protected mode */
 	switch (ah) {
+	case 0x4f:
+		vesa(at);
+		return;
 	case 0x00: { /* set mode */
 		uint8_t mode = al & 0x7f;
+		svga = 0;
 		M[0x449] = mode;
 		mwr(0x44a, 2, mode == 0x13 || mode <= 1 ? 40 : 80);
 		if (mode == 0x13 && !(al & 0x80)) memset(M + 0xa0000, 0, 0x10000);

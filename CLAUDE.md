@@ -49,8 +49,19 @@ generated and ignored.
   mode 3 period apart), which pc.cpp ignored: x then read short (437, 182, 54 instead of 692).
   Scripted calibration: `WC_JOYSTICK=1 WC_KEYS=1500:+j1,1600:-j1,2000:%-100.-100,2500:+j1,2600:-j1,
   3000:%100.100,3500:+j1,3600:-j1,4000:%0.0,4500:+esc,4506:-esc` (min 29, centre 685, max 1342).
-- No VESA BIOS: "No VESA Driver -- Cannot use SVGA" and it takes `MCGA.DLL` (320x200) instead of
-  `VESA480.DLL`; both are LX modules ("386FX", Miles Design 1992/93).
+- Graphics: `VESA480.DLL` (640x480) with a VESA BIOS, else `MCGA.DLL` (320x200, "No VESA Driver --
+  Cannot use SVGA"); both are LX modules ("386FX", Miles Design 1992/93). `vga.cpp` is a VBE 1.2
+  BIOS with mode 101h only (`WC_VESA=0`: none): the game asks 4F01h through 2511h (ES:DI in real
+  mode: `dos_real`), sets it with 4F02h, uses 4F07h (display start), and the DLL switches banks
+  through the mode's window function (F000:0100, `bios_far_call`) with Phar Lap 2510h (a real-mode
+  call with the registers in a block). 512 KB of video memory; a bank switch copies the 64 KB window
+  at A0000h out and the new bank in. Frames carry their size (`vga_frame`); `WC_SCREENSHOT` files
+  hold 640x480 pixels then. The mouse stays in 320x200 terms, scaled to the game's 640x480 range,
+  so the hotspot positions below hold in both modes.
+- Flight: the space backdrop is drawn by a texture mapper (b3757..) that patches its row table's
+  address into its own displacements (`MOV ES:[0xb375a],EAX`, 15 of them); recompiled with the
+  placeholder (-1) it drew black. The generator's patched-constant handling (drivers before) now
+  covers the program too, including Ghidra's `0 + c` for ES:[c].
 - Sound: `hmidrv.386` on the CD is a library of HMI SOS drivers, one per card; the game loads the
   ones it needs into conventional memory blocks (25C0h), makes data and code selectors for them
   (2531h) and far-calls them. GOG's `WC3.CFG` (dwords): music device A001h (MPU-401, General MIDI)
@@ -87,6 +98,11 @@ generated and ignored.
   (first at 75,52), Load (50,176): "GAME LOADED.", Return (255,176), Logoff (160,176). Scripted after
   the Flight Control click above: `14000:@180.40,14400:+lmb,14500:-lmb`, letters from 17000 every 80
   ticks (held 30), then 18900, 20900, 21900, 23900, 25400 for the clicks (checked on both clocks).
+- After loading, "Fly MISSION." is at the right edge of Flight Control (300,100); Esc skips the
+  launch scene into the cockpit, in the launch bay. Take off with A (the manual's auto-takeoff):
+  full throttle there flies into the bay. Script (after the load steps, with the mouse centred):
+  `27500:@300.100,27900:+lmb,28000:-lmb,30000:+esc,30010:-esc,38000:@160.100,40000:+a,40100:-a,
+  50000:+a,50100:-a` (autopilot), then Space (guns), t (target), Enter (missile).
 
 ## Static recompilation (WcRecomp.java + runtime/)
 
@@ -111,6 +127,8 @@ generated and ignored.
 - x87: Ghidra's 10-byte ST registers carry doubles here (x87_* helpers in `wc_rt.h`, `flat32.cpp`);
   PcodeOp names: FLOAT_FLOAT2FLOAT, FLOAT_INT2FLOAT, FLOAT_TRUNC. The helpers are named x87_* since
   `fcvt` collided with libc's.
+- Recompiling: each captured driver costs a Ghidra run, so `doRecomp` redoes a driver only when its
+  bytes, its entries or `WcRecomp.java` changed (`drv_<name>.stamp` in `out/recomp/`).
 - Missing code: runtime exits 4 (`wc: missing code at X`); `npm run discover` adds X to
   `entries.txt` (repository root; commit it after discover rounds) and recompiles. Bugs elsewhere
   produce garbage addresses: check an entry is real code before keeping it.
@@ -177,9 +195,11 @@ generated and ignored.
 
 ## State
 
-The intro and credits play with their digital sound on the SB16; Esc twice reaches the hangar,
-where the mouse works (hotspots, Flight Control), with General MIDI music on macOS. Missing: text
-mode in the window, General MIDI in the browser, the web page (`web/` is still wc-decomp's).
+At 640x480 (VESA): the intro and credits with their digital sound on the SB16, the hangar and
+Flight Control with the mouse, General MIDI music on macOS, loading a save at a Main Terminal,
+take-off, flight with the backdrop, autopilot, guns, targeting and missiles (scripted, no crash).
+Missing: text mode in the window, General MIDI in the browser, the web page (`web/` is still
+wc-decomp's; `web_frame_width/height` give the frame's size).
 
 ## Conventions
 

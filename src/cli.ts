@@ -101,13 +101,29 @@ const doRecomp = async (): Promise<void> => {
     "-postScript", "WcRecomp.java", recompDir, entriesFile,
   ]);
   const drivers = readDrivers();
+  // A driver is recompiled only when its bytes, its entries or the generator changed (a Ghidra run
+  // per driver took most of each discover round, and new entries are mostly the program's).
+  const entries = existsSync(entriesFile)
+    ? readFileSync(entriesFile, "utf8").split("\n").map((l) => l.replace(/#.*/, "").trim()).filter((l) => l)
+    : [];
+  const generator = readFileSync(path.join(scriptPath, "WcRecomp.java"));
   for (const d of drivers) {
+    const image = readFileSync(path.join(loadedDir, d.file));
+    const mine = entries.filter((e) => {
+      const a = parseInt(e, 16);
+      return a >= d.virt && a < d.virt + image.length;
+    });
+    const stamp = createHash("sha256").update(image).update(generator).update(mine.join(",")).digest("hex");
+    const stampFile = path.join(recompDir, `drv_${d.name}.stamp`);
+    if (existsSync(path.join(recompDir, `drv_${d.name}.cpp`)) && existsSync(stampFile) &&
+      readFileSync(stampFile, "utf8") === stamp) continue;
     await runHeadless(findGhidra(), [
       projectDir, `${projectName}/loaded`,
       "-process", d.file, "-noanalysis", "-readOnly",
       "-scriptPath", scriptPath,
       "-postScript", "WcRecomp.java", "driver", recompDir, d.name, entriesFile,
     ]);
+    writeFileSync(stampFile, stamp);
   }
   writeDriverList(drivers);
   await doBuild();

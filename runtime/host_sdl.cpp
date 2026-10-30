@@ -13,7 +13,8 @@
 
 static SDL_Window *window;
 static SDL_Renderer *renderer;
-static SDL_Texture *picture; /* 320x200, the frame in colour */
+static SDL_Texture *picture; /* the frame in colour, at its size (320x200 or 640x480) */
+static int picture_w, picture_h;
 static SDL_Texture *scaled;  /* the picture enlarged by whole factors, then smoothly to the window */
 static int scaled_x, scaled_y;
 static SDL_FRect shown_at;    /* where the picture is in the window (render pixels), for the mouse */
@@ -50,8 +51,6 @@ int host_open(void)
 	SDL_SetRenderVSync(renderer, 1);
 	const char *speed = getenv("WC_MOUSE_SPEED");
 	if (speed && atof(speed) > 0) mouse_speed = (float)atof(speed);
-	picture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_XRGB8888, SDL_TEXTUREACCESS_STREAMING, 320, 200);
-	SDL_SetTextureScaleMode(picture, SDL_SCALEMODE_NEAREST);
 	return 1;
 }
 
@@ -151,11 +150,20 @@ static void release_all(void)
 
 static void present(void)
 {
-	static uint8_t pixels[320 * 200], palette[256 * 3];
+	static uint8_t pixels[640 * 480], palette[256 * 3];
 	static uint64_t shown = ~0ull;
-	uint64_t n = vga_frame(pixels, palette);
+	int fw, fh;
+	uint64_t n = vga_frame(pixels, palette, &fw, &fh);
 	if (n != shown) {
 		shown = n;
+		if (!picture || fw != picture_w || fh != picture_h) {
+			if (picture) SDL_DestroyTexture(picture);
+			picture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_XRGB8888, SDL_TEXTUREACCESS_STREAMING, fw, fh);
+			SDL_SetTextureScaleMode(picture, SDL_SCALEMODE_NEAREST);
+			picture_w = fw;
+			picture_h = fh;
+			scaled_x = 0; /* make the enlarged copy again */
+		}
 		uint32_t colour[256];
 		for (int i = 0; i < 256; i++) {
 			const uint8_t *c = palette + 3 * i; /* 6 bits per component to 8 */
@@ -165,27 +173,29 @@ static void present(void)
 		void *dst;
 		int pitch;
 		if (SDL_LockTexture(picture, NULL, &dst, &pitch)) {
-			for (int y = 0; y < 200; y++) {
+			for (int y = 0; y < fh; y++) {
 				uint32_t *row = (uint32_t *)((uint8_t *)dst + y * pitch);
-				for (int x = 0; x < 320; x++) row[x] = colour[pixels[y * 320 + x]];
+				for (int x = 0; x < fw; x++) row[x] = colour[pixels[y * fw + x]];
 			}
 			SDL_UnlockTexture(picture);
 		}
 	}
 
-	/* 320x200 shown at 4:3 (VGA pixels are 1.2 times as tall as wide), as large as fits */
+	if (!picture) return;
+	/* shown at 4:3 (320x200's pixels are 1.2 times as tall as wide, 640x480's square), as large as fits */
 	int w, h;
 	SDL_GetRenderOutputSize(renderer, &w, &h);
 	float dw = (float)w, dh = dw * 3 / 4;
 	if (dh > (float)h) { dh = (float)h; dw = dh * 4 / 3; }
 	SDL_FRect dst = { ((float)w - dw) / 2, ((float)h - dh) / 2, dw, dh };
 	/* sharp but even pixels: enlarge by whole factors without smoothing, then scale smoothly */
-	int sx = (int)SDL_ceilf(dw / 320), sy = (int)SDL_ceilf(dh / 200);
+	int sx = (int)SDL_ceilf(dw / (float)picture_w), sy = (int)SDL_ceilf(dh / (float)picture_h);
 	if (sx < 1) sx = 1;
 	if (sy < 1) sy = 1;
 	if (!scaled || sx != scaled_x || sy != scaled_y) {
 		if (scaled) SDL_DestroyTexture(scaled);
-		scaled = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_XRGB8888, SDL_TEXTUREACCESS_TARGET, 320 * sx, 200 * sy);
+		scaled = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_XRGB8888, SDL_TEXTUREACCESS_TARGET, picture_w * sx,
+			picture_h * sy);
 		SDL_SetTextureScaleMode(scaled, SDL_SCALEMODE_LINEAR);
 		scaled_x = sx;
 		scaled_y = sy;

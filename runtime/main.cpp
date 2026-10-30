@@ -13,13 +13,14 @@
  *   WC_MOUSE_SPEED=x  the mouse's speed in full screen (default 2; Cmd+Left/Right in the window)
  *   WC_WAV=file     record the sound (AdLib, MT-32 or General MIDI, with the Sound Blaster's) to a WAV file
  *   WC_SB=0         no Sound Blaster (by default one at 220h, IRQ 5, DMA 1)
+ *   WC_VESA=0       no VESA BIOS (the game then runs at 320x200 instead of 640x480)
  *   WC_GM=0         no General MIDI synth (macOS's, behind the MPU-401 when there is no WC_MT32)
  *   WC_CYCLES=n     instructions per millisecond ("max": unlimited; Cmd+Up/Down in the window)
  *   WC_FPS=n        frames per second in space flight, where frames are paced instead (default 15; 0: off;
  *                   Cmd+Up/Down in flight)
  *   WC_STATS=1      print the frame rate in flight every second
  *   WC_EMS=0        no expanded memory (EMS, 8 MB by default, as in GOG's DOSBox)
- *   WC_WARP=0       no quick start (until the first picture, time runs 20 times as fast)
+ *   WC_WARP=0       no quick start (until the first picture, or the end of a WC_KEYS script, time runs 20 times as fast)
  *   WC_CLOCK=x      instructions: emulated time from the instructions executed (default headless),
  *                   real: real time (default in the window)
  *   WC_JOYSTICK=0/1 never/always a joystick (by default while there is a game controller)

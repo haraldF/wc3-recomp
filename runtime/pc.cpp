@@ -37,11 +37,13 @@ static void bios_work(uint8_t n, uint32_t at);
 void ems_init(void);
 uint8_t joystick_in(void);
 void mouse_poll(void);
+void mouse_post(int x, int y, int buttons);
 void joystick_out(void);
 int joystick_busy(void);
 void vga_out(uint64_t port, uint64_t value);
 void vga_poll(uint64_t now);
 void vga_init(void);
+void vga_window_function(void);
 
 int wc_irq_pending;               /* IRQs raised but not yet delivered (bit per IRQ) */
 static uint8_t pic_mask, pic_in_service;
@@ -83,7 +85,9 @@ static void interrupt(uint8_t vec, uint32_t ret)
 /* Quick start: until the first picture (the intro's first frame), the game mostly waits (it shows
  * its loading messages for a while), so emulated time runs WARP times as fast and instructions
  * aren't limited. It ends at the first visible frame or the first key or mouse button (WC_WARP=0:
- * off). The clock stays continuous: emulated time = real time + WARP - 1 times the real time spent
+ * off); with a WC_KEYS script, after the script's last step instead (or at the first key or button
+ * of the user's), so a script that gets somewhere (loads a save) is over in a few seconds. Its keys
+ * and clicks happen in emulated time, so they land where they would without it. The clock stays continuous: emulated time = real time + WARP - 1 times the real time spent
  * warping. */
 enum { WARP = 20 };
 static uint64_t warp_start_ns;
@@ -109,6 +113,14 @@ uint64_t pc_now_ns(void)
 	uint64_t now = real_ns(), end = warp_end_ns.load(std::memory_order_acquire);
 	if (end == 1) return now;
 	return now + ((end ? end : now) - warp_start_ns) * (WARP - 1);
+}
+
+static int script_left(void);
+
+/* The quick start lasts until the WC_KEYS script is done. */
+int pc_script_warp(void)
+{
+	return script_left();
 }
 
 int pc_warping(void)
@@ -267,6 +279,14 @@ static uint64_t ticks, script_jrelease;
 static uint8_t script_held;          /* key pressed with + and not released yet */
 static uint64_t script_repeat_ns;    /* when it repeats next (typematic: 0.5 s, then 10.9 per second) */
 
+/* Steps of the script still to come (a final quit doesn't count). */
+static int script_left(void)
+{
+	int n = script_len - script_pos;
+	if (n && script[script_len - 1].how == 'q') n--;
+	return n;
+}
+
 static void parse_script(const char *s)
 {
 	while (s && *s) {
@@ -353,7 +373,7 @@ static uint64_t key_down_ns[128];
 
 void pc_key(uint8_t scancode)
 {
-	if (!(scancode & 0x80)) pc_warp_end();
+	if (!(scancode & 0x80)) pc_warp_end(); /* the user takes over */
 	uint32_t tail = host_keys_tail.load(std::memory_order_relaxed);
 	if (tail - host_keys_head.load(std::memory_order_acquire) < sizeof host_keys) {
 		host_keys[tail % sizeof host_keys] = scancode;
@@ -382,7 +402,7 @@ static void poll_keyboard(void)
 		if (how == 'm') {
 			script_mx = mx;
 			script_my = my;
-			pc_mouse(script_mx, script_my, script_buttons);
+			mouse_post(script_mx, script_my, script_buttons);
 		}
 		else if (how == 'j') {
 			script_jx = mx * 10;
@@ -396,8 +416,8 @@ static void poll_keyboard(void)
 			if (how == 'c') script_jrelease = ticks + 6;
 		}
 		else if (mx == -1) { /* mouse button: click, or + press / - release */
-			if (how != '-') pc_mouse(script_mx, script_my, script_buttons |= code);
-			if (how != '+') pc_mouse(script_mx, script_my, script_buttons &= ~code);
+			if (how != '-') mouse_post(script_mx, script_my, script_buttons |= code);
+			if (how != '+') mouse_post(script_mx, script_my, script_buttons &= ~code);
 		}
 		else if (how == '+') {
 			kbd_push(code);
@@ -410,6 +430,7 @@ static void poll_keyboard(void)
 		}
 		else press(code);
 	}
+	if (script_len && !script_left()) pc_warp_end(); /* the script is done */
 	if (script_jrelease && ticks >= script_jrelease) { /* a clicked joystick button goes up */
 		script_jrelease = 0;
 		pc_joystick(script_jx, script_jy, script_jroll, script_jbuttons = 0);
@@ -842,6 +863,10 @@ static void bios_work(uint8_t n, uint32_t at)
  * program chaining to an interrupt's old vector calls. Returns 0 for anything else. */
 int bios_far_call(uint32_t seg_off, uint32_t at)
 {
+	if (seg_off == (BIOS_SEG << 16 | 0x100)) { /* the VESA window function (vga.cpp) */
+		vga_window_function();
+		return 1;
+	}
 	if (seg_off >> 16 != BIOS_SEG || (seg_off & 0xffff) > 0xff) return 0;
 	bios_work((uint8_t)seg_off, at);
 	return 1;

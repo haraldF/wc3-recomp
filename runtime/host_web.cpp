@@ -23,13 +23,16 @@ int host_has_mouse(void)
 
 /* ---- the picture: the page asks for it at every animation frame ---- */
 
-/* The newest frame as RGBA bytes (320x200), or NULL when it hasn't changed since the last call. */
+static int frame_w = 320, frame_h = 200;
+
+/* The newest frame as RGBA bytes (web_frame_width x web_frame_height), or NULL when it hasn't
+ * changed since the last call. */
 EMSCRIPTEN_KEEPALIVE uint32_t *web_frame(void)
 {
-	static uint8_t pixels[320 * 200], palette[256 * 3];
-	static uint32_t rgba[320 * 200];
+	static uint8_t pixels[640 * 480], palette[256 * 3];
+	static uint32_t rgba[640 * 480];
 	static uint64_t shown = ~0ull;
-	uint64_t n = vga_frame(pixels, palette);
+	uint64_t n = vga_frame(pixels, palette, &frame_w, &frame_h);
 	if (n == shown) return NULL;
 	shown = n;
 	uint32_t colour[256];
@@ -38,9 +41,12 @@ EMSCRIPTEN_KEEPALIVE uint32_t *web_frame(void)
 		colour[i] = 0xff000000u | (uint32_t)((c[2] << 2) | (c[2] >> 4)) << 16 |
 			(uint32_t)((c[1] << 2) | (c[1] >> 4)) << 8 | (uint32_t)((c[0] << 2) | (c[0] >> 4));
 	}
-	for (int i = 0; i < 320 * 200; i++) rgba[i] = colour[pixels[i]];
+	for (int i = 0; i < frame_w * frame_h; i++) rgba[i] = colour[pixels[i]];
 	return rgba;
 }
+
+EMSCRIPTEN_KEEPALIVE int web_frame_width(void) { return frame_w; }
+EMSCRIPTEN_KEEPALIVE int web_frame_height(void) { return frame_h; }
 
 /* ---- input and speed, from the page ---- */
 

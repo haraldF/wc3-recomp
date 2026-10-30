@@ -261,6 +261,8 @@ void flat32_int(uint64_t n, uint32_t at, uint32_t next)
 /* AX=2511h: the interrupt with the real-mode segment registers and EAX/EDX from the block (+0
  * interrupt, +2 DS, +4 ES, +6 FS, +8 GS, +0Ah EAX, +0Eh EDX), the other registers as they are;
  * the results go back into the block and EAX. */
+int dos_real; /* a real-mode interrupt (2511h) is being done: segment registers hold segments */
+
 static void real_interrupt(uint32_t b, uint32_t at)
 {
 	uint16_t n = (uint16_t)mrd32(b, 2);
@@ -277,7 +279,9 @@ static void real_interrupt(uint32_t b, uint32_t at)
 	wr(R_GS, 2, mrd32(b + 8, 2));
 	wr(R_AX, 4, mrd32(b + 10, 4));
 	wr(R_DX, 4, mrd32(b + 14, 4));
+	dos_real = 1;
 	dos_int(n, at);
+	dos_real = 0;
 	mwr32(b + 2, 2, rd(R_DS, 2));
 	mwr32(b + 4, 2, rd(R_ES, 2));
 	mwr32(b + 6, 2, rd(R_FS, 2));
@@ -371,6 +375,16 @@ static void pharlap(uint32_t at)
 			if ((uint16_t)rd(0x100 + 2 * r, 2) == es) seg_load(r, es);
 		}
 		if (wc_trace) fprintf(stderr, "wc: mapped at %04x:%08llx (base %08x)\n", es, rd(R_AX, 4), desc[i].base);
+		break;
+	}
+	case 0x10: { /* call the real-mode procedure at EBX with the registers in the block at DS:EDX (DS, ES,
+		* FS, GS words, then EAX, EBX, ECX, EDX): our BIOS's entries only (VESA480.DLL's bank switch).
+		* The procedure's registers come back in the registers and the block. */
+		uint32_t b = ds + edx;
+		static const uint32_t regs[4] = { R_AX, R_BX, R_CX, R_DX };
+		for (int r = 0; r < 4; r++) wr(regs[r], 4, mrd32(b + 8 + 4 * r, 4));
+		if (!bios_far_call(ebx, at)) unknown("real-mode procedure call to", ebx >> 16, at);
+		for (int r = 0; r < 4; r++) mwr32(b + 8 + 4 * r, 4, rd(regs[r], 4));
 		break;
 	}
 	case 0x0e: /* call the real-mode procedure at EBX (segment:offset): our BIOS's entries only */

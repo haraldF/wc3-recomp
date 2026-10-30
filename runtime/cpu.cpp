@@ -260,14 +260,20 @@ void pc_report(FILE *f);
 
 extern uint8_t wc_palette[256][3];
 
-/* WC_SCREENSHOT=file: the VGA palette (768 bytes, 6-bit) and the 320x200 frame buffer, raw. */
+int vga_picture(uint8_t *buf, int *w, int *h);
+
+/* WC_SCREENSHOT=file: the VGA palette (768 bytes, 6-bit) and the picture, raw: 320x200 bytes, or
+ * 640x480 in the VESA mode. */
 static void screenshot(void)
 {
 	const char *path = getenv("WC_SCREENSHOT");
 	FILE *f = path ? fopen(path, "wb") : NULL;
 	if (f) {
+		static uint8_t pixels[640 * 480];
+		int w, h;
+		vga_picture(pixels, &w, &h);
 		fwrite(wc_palette, 1, sizeof wc_palette, f);
-		fwrite(M + 0xa0000, 1, 320 * 200, f);
+		fwrite(pixels, 1, (size_t)w * h, f);
 		fclose(f);
 	}
 }

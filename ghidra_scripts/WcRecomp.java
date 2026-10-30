@@ -62,9 +62,9 @@ public class WcRecomp extends GhidraScript {
 	/** Driver mode: its name, else null; address -> length of each emitted instruction */
 	private String driver;
 	private final TreeMap<Long, Integer> codeBytes = new TreeMap<>();
-	/** Driver mode: addresses of the driver's own bytes that it writes with stores to fixed addresses
-	 * (self-modifying code: e.g. a selector patched into a MOV's immediate); the instruction being
-	 * translated */
+	/** Addresses of the code's own bytes that it writes with stores to fixed addresses (self-modifying
+	 * code: e.g. a selector patched into a driver's MOV immediate, the program's texture mapper's row
+	 * table address patched into its displacements); the instruction being translated */
 	private final Set<Long> patched = new HashSet<>();
 	private Instruction current;
 
@@ -112,9 +112,7 @@ public class WcRecomp extends GhidraScript {
 		for (Fragment fr : fragments) {
 			entries.put(fr.entry, fname(fr.entry));
 		}
-		if (driver != null) {
-			findPatches(functions, fragments);
-		}
+		findPatches(functions, fragments);
 
 		Map<String, StringBuilder> files = new TreeMap<>();
 		// address of every emitted instruction -> C function, for run()
@@ -163,12 +161,13 @@ public class WcRecomp extends GhidraScript {
 	}
 
 	/**
-	 * Driver mode: the driver's bytes that its own stores to fixed offsets write (a driver's data
-	 * selector covers its code too). Only stores to a constant offset count, the way drivers patch
-	 * their code.
+	 * The code's bytes that its own stores to fixed offsets write (a driver's data selector covers its
+	 * code too, the program's data selector its code). Only stores to a constant offset count, the way
+	 * drivers and the program patch their code.
 	 */
 	private void findPatches(List<Function> functions, List<Fragment> fragments) {
-		long virt = currentProgram.getMinAddress().getOffset();
+		long virt = codeBase();
+		String what = driver != null ? "driver " + driver : "program";
 		List<Instruction> all = new ArrayList<>();
 		for (Function f : functions) {
 			currentProgram.getListing().getInstructions(f.getBody(), true).forEach(all::add);
@@ -186,12 +185,18 @@ public class WcRecomp extends GhidraScript {
 						(op.getInput(0).getOffset() == 0x110 || op.getInput(0).getOffset() == 0x114) && op.getInput(1).isConstant()) {
 					constUniques.put(o.getOffset(), op.getInput(1).getOffset());
 				}
+				// ES:[c] (and the other segments' overrides): 0 + c
+				if (op.getOpcode() == PcodeOp.INT_ADD && o != null && o.isUnique() && op.getInput(0).isConstant() &&
+						op.getInput(1).isConstant()) {
+					constUniques.put(o.getOffset(), (op.getInput(0).getOffset() + op.getInput(1).getOffset()) & 0xffffffffL);
+				}
 				if (op.getOpcode() != PcodeOp.STORE) {
 					continue;
 				}
 				Varnode a = op.getInput(1);
 				Long off = a.isConstant() ? Long.valueOf(a.getOffset()) : a.isUnique() ? constUniques.get(a.getOffset()) : null;
-				if (off != null && off < currentProgram.getMemory().getSize()) {
+				if (off != null && (driver != null ? off < currentProgram.getMemory().getSize()
+						: currentProgram.getMemory().contains(toAddr(off)))) {
 					for (int k = 0; k < op.getInput(2).getSize(); k++) {
 						patched.add(virt + off + k);
 					}
@@ -202,22 +207,28 @@ public class WcRecomp extends GhidraScript {
 		for (Instruction ins : all) {
 			for (int k = 0; k < ins.getLength(); k++) {
 				if (patched.contains(ins.getAddress().getOffset() + k)) {
-					println("WcRecomp: driver " + driver + ": " + ins.getAddress() + " " + ins + " is patched at runtime");
+					println("WcRecomp: " + what + ": " + ins.getAddress() + " " + ins + " is patched at runtime");
 					n++;
 					break;
 				}
 			}
 		}
-		println("WcRecomp: driver " + driver + ": " + n + " instructions patched at runtime");
+		println("WcRecomp: " + what + ": " + n + " instructions patched at runtime");
+	}
+
+	/** What the code selector's offset 0 is in this program's addresses: a driver's virtual address,
+	 * 0 for the program (its addresses are its offsets). */
+	private long codeBase() {
+		return driver != null ? currentProgram.getMinAddress().getOffset() : 0;
 	}
 
 	/** A constant of the instruction being translated that is in bytes the driver patches: read them
 	 * at runtime (from the code segment), else null. */
 	private String patchedConstant(Varnode v) {
-		if (driver == null || current == null || v.getSize() > 4) {
+		if (current == null || v.getSize() > 4 || patched.isEmpty()) {
 			return null;
 		}
-		long at = current.getAddress().getOffset(), virt = currentProgram.getMinAddress().getOffset();
+		long at = current.getAddress().getOffset(), virt = codeBase();
 		try {
 			byte[] b = current.getBytes();
 			for (int p = 0; p + v.getSize() <= b.length; p++) {

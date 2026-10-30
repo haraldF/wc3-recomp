@@ -10,9 +10,10 @@ int host_open(void);
 [[noreturn]] void host_run(void (*game)(void));
 
 /* Provided by the emulation, called on the host's thread. */
-/* The newest complete frame: mode 13h pixels and the 6-bit palette, taken at vertical retrace.
- * Returns a count that changes with every frame. */
-uint64_t vga_frame(uint8_t pixels[320 * 200], uint8_t palette[256 * 3]);
+/* The newest complete frame: its pixels (320x200 in mode 13h, 640x480 in VESA mode 101h; the size
+ * into w and h) and the 6-bit palette, taken at vertical retrace. Returns a count that changes with
+ * every frame. */
+uint64_t vga_frame(uint8_t pixels[640 * 480], uint8_t palette[256 * 3], int *w, int *h);
 /* A scancode (set 1: make code, | 0x80 for the break code) from the keyboard. */
 void pc_key(uint8_t scancode);
 /* CPU speed in instructions per millisecond (0: unlimited); change > 0 raises it by 20%, < 0

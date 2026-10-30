@@ -27,6 +27,7 @@ static void post(int x, int y, int buttons, int relative)
 
 void pc_warp_end(void);
 void pc_mouse(int x, int y, int buttons) { if (buttons) pc_warp_end(); post(x, y, buttons, 0); }
+void mouse_post(int x, int y, int buttons) { post(x, y, buttons, 0); } /* WC_KEYS: no warp end */
 void pc_mouse_move(int dx, int dy, int buttons) { if (buttons) pc_warp_end(); post(dx, dy, buttons, 1); }
 
 static int x, y = 100, min_x, max_x = 639, min_y, max_y = 199;
