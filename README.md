@@ -4,9 +4,11 @@ Statically recompiles Wing Commander III: Heart of the Tiger (`WC3.EXE`, a 32-bi
 the Phar Lap 386|DOS-Extender) to C++ with Ghidra, driven from TypeScript, and builds it into a
 native macOS program with an emulated PC around it.
 
-Work in progress: the startup runs (~2 million instructions, text-mode loading messages, the
-game's files found on the CD image) up to the first call into a driver the game loads at runtime;
-nothing is drawn yet.
+The game is fully playable on macOS, at 640x480 with its movies, digital sound and General MIDI
+music. Some code addresses may still be missing: code reached only through pointers is found by
+running it, so a part of the game nobody has played yet can stop with `wc: missing code at X`
+(see below). Still to do: text mode in the window (joystick calibration prompts go to the
+terminal), and the web build (`web/` is still wc-decomp's, with no General MIDI).
 
 It grew out of wc-decomp, the same for Wing Commander I and II (16-bit real-mode programs): the
 PC emulation (`runtime/`: DOS, BIOS, timer, keyboard, mouse, VGA, AdLib, MT-32, General MIDI, Sound Blaster, the
@@ -33,7 +35,15 @@ Then, with GOG's game folder at `../game3` (or `-- --iso path/to/DATA.DAT` for e
 npm run decompile    # WC3.EXE from the CD image, unpacked and analyzed with Ghidra (long)
 npm run recomp       # generate C from it (out/recomp/) and build out/bin/wc3
 npm run discover     # run it; code reached only through pointers is added to entries.txt
+npm run play         # play it in a window
 ```
+
+Addresses the game reaches that weren't recompiled stop it. `npm run play` handles that itself:
+it adds the address to `entries.txt` (or captures the driver the game loaded), recompiles and
+starts the game again, so you continue from your last save. Started directly, `out/bin/wc3` exits
+with code 4 and the address, and `npm run discover` does the same headless.
+
+The game writes into its folder (`WC3/`, saves, its swap file).
 
 ## How it works
 
