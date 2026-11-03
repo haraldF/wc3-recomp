@@ -22,7 +22,7 @@ static std::atomic<uint32_t> warp_wanted, warp_done; /* requests made, and taken
 static std::atomic<int> warp_x, warp_y;               /* where to, in the window's 320x200 */
 static std::atomic<int> host_warps;                   /* the host moves its pointer */
 
-static void post(int x, int y, int buttons, int relative)
+static void post(int x, int y, int buttons, int relative, uint32_t warp)
 {
 	uint32_t tail = events_tail.load(std::memory_order_relaxed);
 	if (tail - events_head.load(std::memory_order_acquire) < 256) {
@@ -30,16 +30,18 @@ static void post(int x, int y, int buttons, int relative)
 		events[tail % 256].y = (int16_t)y;
 		events[tail % 256].buttons = (uint8_t)buttons;
 		events[tail % 256].relative = (uint8_t)relative;
-		events[tail % 256].warp = warp_done.load(std::memory_order_relaxed);
+		events[tail % 256].warp = warp;
 		events_tail.store(tail + 1, std::memory_order_release);
 	}
 	mouse_seen.store(1);
 }
 
 void pc_warp_end(void);
-void pc_mouse(int x, int y, int buttons) { if (buttons) pc_warp_end(); post(x, y, buttons, 0); }
-void mouse_post(int x, int y, int buttons) { post(x, y, buttons, 0); } /* WC_KEYS: no warp end */
-void pc_mouse_move(int dx, int dy, int buttons) { if (buttons) pc_warp_end(); post(dx, dy, buttons, 1); }
+static uint32_t host_saw(void) { return warp_done.load(std::memory_order_relaxed); }
+void pc_mouse(int x, int y, int buttons) { if (buttons) pc_warp_end(); post(x, y, buttons, 0, host_saw()); }
+/* WC_KEYS, on the emulation's thread: never stale, and no warp end */
+void mouse_post(int x, int y, int buttons) { post(x, y, buttons, 0, warp_wanted.load(std::memory_order_relaxed)); }
+void pc_mouse_move(int dx, int dy, int buttons) { if (buttons) pc_warp_end(); post(dx, dy, buttons, 1, host_saw()); }
 
 int pc_mouse_warp(int *x, int *y)
 {
