@@ -221,8 +221,8 @@ generated and ignored.
 ## The CD (runtime/iso.cpp, dos.cpp)
 
 - `DATA.DAT` is drive D: (`WC_CD=file` for another image): ISO 9660, primary volume descriptor
-  names only. Files there open read-only through a `dup` of the image's descriptor, read with
-  `pread`. Per-drive current directories; the program starts on D:. MSCDEX: 1500h, 150Bh, 150Ch,
+  names only. The image is one `std::ifstream` (`iso_read`: seek, read); files there are a place
+  and size in it. Per-drive current directories; the program starts on D:. MSCDEX: 1500h, 150Bh, 150Ch,
   150Dh (also through 2511h from protected mode, with real-mode ES:BX).
 
 ## State
@@ -241,6 +241,13 @@ wc-decomp's; `web_frame_width/height` give the frame's size).
   touched. munt through its C interface (`MT32EMU_API_TYPE 1`). File-scope `const` has internal
   linkage in C++: the generated tables are declared `extern` in `wc_rt.h`. A full build of the
   generated code takes ~70 s (no slower than as C).
+- Portable: the standard library rather than POSIX (`std::filesystem` for the game folder, `FILE *`
+  for DOS's file handles, `std::chrono` and `std::this_thread` for clocks and sleeps, `std::mutex`).
+  The game thread needs a 256 MB stack, which `std::thread` can't ask for: the SDL host starts it
+  with `SDL_CreateThreadWithProperties` (the web host keeps Emscripten's pthreads). The terminal
+  keyboard (headless) is the one `#ifdef`: termios, or conio on Windows (not built yet). macOS-only
+  still: `gm.cpp` (AudioToolbox). Changing this was checked by memory dumps of headless runs
+  (loading a save, the calibration writing `JOY0.DAT`): identical before and after.
 - Ghidra 12.2 (Homebrew; JAVA_HOME from the `ghidraRun` wrapper). Headless: a second
   `-scriptPath` overrides the first (join with `;`).
 - Debug env vars: `WC_TRACE` (1 DOS/IRQ/extender calls, 2 every instruction, 3 more), `WC_KEYS`,

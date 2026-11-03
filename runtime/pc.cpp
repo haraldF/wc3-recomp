@@ -1,14 +1,19 @@
 /* PC hardware around the CPU: interrupt delivery, the 8259 interrupt controller, the 8253 timer,
  * the keyboard controller and the ROM BIOS (handled here natively, for interrupts the program has
  * no protected-mode handler for). */
-#include <fcntl.h>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <thread>
+#ifdef _WIN32
+#include <conio.h>
+#include <io.h>
+#else
 #include <termios.h>
-#include <ctime>
 #include <unistd.h>
+#endif
 
 #include "host.h"
 #include "wc_rt.h"
@@ -95,9 +100,13 @@ static std::atomic<uint64_t> warp_end_ns = 1; /* 0: warping; set when it ends (1
 
 static uint64_t real_ns(void)
 {
-	struct timespec ts;
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
+	return (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+		std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+static void sleep_ns(uint64_t ns)
+{
+	std::this_thread::sleep_for(std::chrono::nanoseconds(ns));
 }
 
 /* Headless, emulated time comes from the instructions executed (WC_CLOCK=instructions, the default
@@ -185,8 +194,44 @@ static int pit_output(uint64_t clocks)
 /* ---- keyboard ---- */
 
 static uint8_t kbd_queue[64], kbd_head, kbd_tail, kbd_data;
+/* Keys typed in the terminal (without a window): its input unbuffered and without echo. There is
+ * nothing in the standard library for that. */
 static int kbd_tty;
+#ifdef _WIN32
+static int tty_open(void) { return _isatty(0); }
+static int tty_read(char *c)
+{
+	if (!_kbhit()) return 0;
+	*c = (char)_getch();
+	return 1;
+}
+#else
 static struct termios kbd_saved;
+
+static void restore_tty(void)
+{
+	tcsetattr(0, TCSANOW, &kbd_saved);
+}
+
+static int tty_open(void)
+{
+	if (!isatty(0)) return 0;
+	struct termios raw;
+	tcgetattr(0, &kbd_saved);
+	raw = kbd_saved;
+	raw.c_lflag &= (tcflag_t)~(ICANON | ECHO);
+	raw.c_cc[VMIN] = 0;
+	raw.c_cc[VTIME] = 0;
+	tcsetattr(0, TCSANOW, &raw);
+	atexit(restore_tty);
+	return 1;
+}
+
+static int tty_read(char *c)
+{
+	return read(0, c, 1) == 1;
+}
+#endif
 
 static void kbd_push(uint8_t scancode)
 {
@@ -381,11 +426,6 @@ void pc_key(uint8_t scancode)
 	}
 }
 
-static void restore_tty(void)
-{
-	tcsetattr(0, TCSANOW, &kbd_saved);
-}
-
 static void poll_keyboard(void)
 {
 	while (script_pos < script_len && ticks >= script[script_pos].tick) {
@@ -451,7 +491,7 @@ static void poll_keyboard(void)
 	host_keys_head.store(head, std::memory_order_release);
 	if (kbd_tty) {
 		char c;
-		while (read(0, &c, 1) == 1) {
+		while (tty_read(&c)) {
 			press(scancode_for(c));
 		}
 	}
@@ -555,8 +595,7 @@ static void throttle(void)
 	}
 	uint64_t due_ns = throttle_start_ns + (wc_icount - throttle_start_icount) * 1000000u / cycles;
 	if (due_ns > now + 1000000u && !joystick_busy()) { /* more than 1 ms ahead: wait */
-		struct timespec ts = { 0, (long)(due_ns - now) };
-		nanosleep(&ts, NULL);
+		sleep_ns(due_ns - now);
 	}
 	else if (now > due_ns + 50000000u) { /* far behind (e.g. waiting for a key): don't catch up */
 		throttle_start_ns = now;
@@ -605,8 +644,7 @@ void pc_frame(uint32_t at)
 			continue;
 		}
 		uint64_t wait = next_frame_ns - now;
-		struct timespec ts = { 0, (long)(wait < 1000000u ? wait : 1000000u) };
-		nanosleep(&ts, NULL);
+		sleep_ns(wait < 1000000u ? wait : 1000000u);
 		poll_devices();
 		deliver(at);
 	}
@@ -619,7 +657,7 @@ static void pc_wait(uint32_t at)
 	uint64_t saved_if = rd(R_IF, 1);
 	wr(R_IF, 1, 1);
 	if (clock_instructions) clock_skip_ns += 1000000u;
-	else usleep(1000);
+	else sleep_ns(1000000u);
 	poll_devices();
 	deliver(at);
 	wr(R_IF, 1, saved_if);
@@ -921,15 +959,5 @@ void pc_init(int tty)
 
 	parse_script(getenv("WC_KEYS"));
 	parse_stick_keys(getenv("WC_STICK_KEYS"));
-	if (tty && isatty(0) && !getenv("WC_KEYS")) {
-		struct termios raw;
-		tcgetattr(0, &kbd_saved);
-		raw = kbd_saved;
-		raw.c_lflag &= (tcflag_t)~(ICANON | ECHO);
-		raw.c_cc[VMIN] = 0;
-		raw.c_cc[VTIME] = 0;
-		tcsetattr(0, TCSANOW, &raw);
-		atexit(restore_tty);
-		kbd_tty = 1;
-	}
+	if (tty && !getenv("WC_KEYS")) kbd_tty = tty_open();
 }

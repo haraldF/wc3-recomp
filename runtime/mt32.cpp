@@ -4,11 +4,10 @@
  * without it to the General MIDI synth (gm.cpp).
  * WC_MT32_MACHINE picks the model (munt's names: mt32_1_07, cm32l_1_02, ...), else the first one
  * the folder has ROMs for, in the order below. Samples are made like the AdLib's (opl.cpp). */
-#include <dirent.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <sys/stat.h>
+#include <filesystem>
 
 #define MT32EMU_API_TYPE 1 /* munt's C interface */
 #include "mt32emu.h"
@@ -102,25 +101,18 @@ void mt32_out(uint64_t port, uint64_t value)
 }
 
 /* Offers every file in dir (and one level of subfolders) to the synth as a ROM of machine. */
-static void add_roms(const char *machine, const char *dir, int depth)
+static void add_roms(const char *machine, const std::filesystem::path &dir, int depth)
 {
-	DIR *d = opendir(dir);
-	if (!d) return;
-	struct dirent *e;
-	while ((e = readdir(d))) {
-		if (e->d_name[0] == '.') continue;
-		char path[1024];
-		struct stat st;
-		snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
-		if (stat(path, &st)) continue;
-		if (S_ISDIR(st.st_mode)) {
-			if (depth) add_roms(machine, path, depth - 1);
+	std::error_code ec;
+	for (const auto &e : std::filesystem::directory_iterator(dir, ec)) {
+		if (e.path().filename().string()[0] == '.') continue;
+		if (e.is_directory(ec)) {
+			if (depth) add_roms(machine, e.path(), depth - 1);
 		}
-		else if (st.st_size <= 2 * 1024 * 1024) {
-			mt32emu_add_machine_rom_file(synth, machine, path);
+		else if (e.is_regular_file(ec) && e.file_size(ec) <= 2 * 1024 * 1024) {
+			mt32emu_add_machine_rom_file(synth, machine, e.path().string().c_str());
 		}
 	}
-	closedir(d);
 }
 
 void mt32_init(void)

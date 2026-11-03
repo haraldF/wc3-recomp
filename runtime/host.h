@@ -4,6 +4,8 @@
 #pragma once
 #include <cstdint>
 
+/* The folder the program's files (image.bin) are in: the executable's. */
+const char *host_base_dir(void);
 /* Open the window, unless WC_HEADLESS is set or there is no display. Returns 0 when headless. */
 int host_open(void);
 /* Run game on a thread of its own and serve the window until the program exits. */

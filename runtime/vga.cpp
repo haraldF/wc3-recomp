@@ -3,10 +3,10 @@
  * VESA (VBE 1.2) mode 101h, 640x480 with 256 colours, banked through the 64 KB window at A0000h
  * (Wing Commander III's VESA480.DLL; without it, MCGA.DLL at 320x200), or text mode (the joystick
  * calibration) at 640x400 with the host's font. WC_VESA=0: no VESA BIOS. */
-#include <pthread.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 
 #include "host.h"
 #include "wc_rt.h"
@@ -237,7 +237,7 @@ int vga_picture(uint8_t *buf, int *w, int *h)
 	return 1;
 }
 
-static pthread_mutex_t frame_lock = PTHREAD_MUTEX_INITIALIZER;
+static std::mutex frame_lock;
 static uint8_t frame_pixels[640 * 480], frame_palette[256 * 3];
 static int frame_w = 320, frame_h = 200;
 static uint64_t frame_count, frame_taken;
@@ -248,11 +248,12 @@ void vga_poll(uint64_t now)
 	uint64_t frame = (now - start_ns + FRAME_NS - (uint64_t)RETRACE_LINE * LINE_NS) / FRAME_NS;
 	if (frame == frame_taken) return;
 	frame_taken = frame;
-	pthread_mutex_lock(&frame_lock);
-	vga_picture(frame_pixels, &frame_w, &frame_h);
-	memcpy(frame_palette, wc_palette, sizeof frame_palette);
-	frame_count++;
-	pthread_mutex_unlock(&frame_lock);
+	{
+		std::lock_guard lock(frame_lock);
+		vga_picture(frame_pixels, &frame_w, &frame_h);
+		memcpy(frame_palette, wc_palette, sizeof frame_palette);
+		frame_count++;
+	}
 	/* the quick start ends with the first visible picture (not DOS's text) */
 	if (pc_warping() && !pc_script_warp() && !text_mode()) {
 		for (int i = 0; i < frame_w * frame_h; i++) {
@@ -267,14 +268,12 @@ void vga_poll(uint64_t now)
 
 uint64_t vga_frame(uint8_t pixels[640 * 480], uint8_t palette[256 * 3], int *w, int *h)
 {
-	pthread_mutex_lock(&frame_lock);
+	std::lock_guard lock(frame_lock);
 	*w = frame_w;
 	*h = frame_h;
 	memcpy(pixels, frame_pixels, (size_t)frame_w * frame_h);
 	memcpy(palette, frame_palette, sizeof frame_palette);
-	uint64_t n = frame_count;
-	pthread_mutex_unlock(&frame_lock);
-	return n;
+	return frame_count;
 }
 
 /* ---- ports ---- */

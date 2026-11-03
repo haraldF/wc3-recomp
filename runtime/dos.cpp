@@ -3,16 +3,15 @@
  * program starts on D:, as GOG's DOSBox starts it. Anything not implemented stops the program with
  * the function number, so the next piece of work is obvious. */
 #include <cctype>
-#include <dirent.h>
 #include <cerrno>
-#include <fcntl.h>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <strings.h>
-#include <sys/stat.h>
 #include <ctime>
-#include <unistd.h>
+#include <filesystem>
+#include <string>
+#include <system_error>
 
 #include "host.h"
 #include "iso.h"
@@ -24,32 +23,38 @@ void wc_dump_memory(const char *why);
 const char *wc_game_dir = ".";
 uint16_t wc_psp_seg;
 
-#define MAX_HANDLES 64
-static int handles[MAX_HANDLES] = { 0, 1, 2, -1, -1 }; /* DOS handle -> host fd; 3 = AUX, 4 = PRN */
-/* The host path of each open file and whether it was changed, for host_file_saved() on close. */
-static char handle_path[MAX_HANDLES][1024];
-static uint8_t handle_changed[MAX_HANDLES];
+namespace fs = std::filesystem;
+
+/* DOS's file handles: the console's three (standard input, output, error; 3 and 4, AUX and PRN, are
+ * closed), files in the game folder, and files on the CD (where they are in the image, their size
+ * and position). A file's host path and whether it was changed are for host_file_saved() on close. */
+enum { MAX_HANDLES = 64, FIRST_FILE = 5 };
+enum handle_kind { FREE, CON_IN, CON_OUT, CON_ERR, HOST_FILE, CD_FILE };
+static struct handle {
+	handle_kind kind = FREE;
+	FILE *f = NULL;
+	std::string path = "";
+	uint8_t changed = 0;
+	uint64_t start = 0;
+	uint32_t size = 0, pos = 0;
+} handles[MAX_HANDLES] = { { .kind = CON_IN }, { .kind = CON_OUT }, { .kind = CON_ERR } };
 static uint32_t dta;
 enum { DRIVE_C = 2, DRIVE_CD = 3 };
 static int cur_drive = DRIVE_CD;
 static char cwds[26][128]; /* each drive's current directory, DOS style, no leading backslash */
-/* the CD's open files: where they are in the image, their size and position */
-static struct { uint64_t start; uint32_t size, pos; uint8_t open; } cd_file[MAX_HANDLES];
 
 static int cd_present(void)
 {
-	return iso_fd(wc_game_dir) >= 0;
+	return iso_present(wc_game_dir);
 }
 
-static void init_handles(void)
+/* Names compared without case (ASCII). */
+static int same_name(const char *a, const char *b)
 {
-	static int done;
-	if (!done) {
-		for (int i = 5; i < MAX_HANDLES; i++) {
-			handles[i] = -1;
-		}
-		done = 1;
+	for (; *a && *b; a++, b++) {
+		if (toupper((unsigned char)*a) != toupper((unsigned char)*b)) return 0;
 	}
+	return *a == *b;
 }
 
 static void fail_dos(int code)
@@ -168,16 +173,13 @@ static void host_path(const char *rel, char *out, size_t size)
 		if (!strcmp(part, ".")) {
 			continue;
 		}
-		DIR *d = opendir(out);
-		struct dirent *e;
-		if (d) {
-			while ((e = readdir(d))) {
-				if (!strcasecmp(e->d_name, part)) {
-					snprintf(part, sizeof part, "%s", e->d_name);
-					break;
-				}
+		std::error_code ec;
+		for (const auto &e : fs::directory_iterator(out, ec)) {
+			std::string name = e.path().filename().string();
+			if (same_name(name.c_str(), part)) {
+				snprintf(part, sizeof part, "%s", name.c_str());
+				break;
 			}
-			closedir(d);
 		}
 		size_t len = strlen(out);
 		snprintf(out + len, size - len, "/%s", part);
@@ -189,41 +191,50 @@ int dos_file_exists(const char *dos)
 {
 	char path[1024];
 	host_path(dos, path, sizeof path);
-	return !access(path, R_OK);
+	std::error_code ec;
+	return fs::exists(path, ec);
 }
 
-static int dos_error(void)
+/* DOS's error code for a host error. */
+static int dos_error(std::error_code ec)
 {
-	switch (errno) {
-	case ENOENT: return 2;
-	case ENOTDIR: return 3;
-	case EMFILE: return 4;
-	case EACCES: case EPERM: return 5;
-	default: return 0x1f;
+	if (ec == std::errc::no_such_file_or_directory) return 2;
+	if (ec == std::errc::not_a_directory) return 3;
+	if (ec == std::errc::too_many_files_open) return 4;
+	if (ec == std::errc::permission_denied || ec == std::errc::operation_not_permitted || ec == std::errc::file_exists ||
+	    ec == std::errc::directory_not_empty || ec == std::errc::is_a_directory) {
+		return 5;
 	}
+	return 0x1f;
 }
 
-static int new_handle(int fd)
+static std::error_code error(std::errc e)
 {
-	init_handles();
-	for (int i = 5; i < MAX_HANDLES; i++) {
-		if (handles[i] < 0) {
-			handles[i] = fd;
+	return std::make_error_code(e);
+}
+
+/* A free handle of that kind, -1 if there is none. */
+static int new_handle(handle_kind kind)
+{
+	for (int i = FIRST_FILE; i < MAX_HANDLES; i++) {
+		if (handles[i].kind == FREE) {
+			handles[i] = handle{ .kind = kind };
 			return i;
 		}
 	}
-	close(fd);
 	return -1;
 }
 
-static int host_fd(uint64_t h)
+static handle *get_handle(uint64_t h)
 {
-	init_handles();
-	return h < MAX_HANDLES ? handles[h] : -1;
+	return h < MAX_HANDLES && handles[h].kind != FREE ? &handles[h] : NULL;
 }
 
-/* A file on the CD: read-only, through its own descriptor of the image. */
-static void open_cd(const char *dos, const char *abs, int flags, const char *what)
+/* How a file is opened: create (or empty) it, or open it to read, write or both. */
+enum open_mode { OPEN_READ, OPEN_WRITE, OPEN_RW, CREATE };
+
+/* A file on the CD: read-only, read from the image (iso.cpp). */
+static void open_cd(const char *dos, const char *abs, open_mode mode, const char *what)
 {
 	struct iso_entry e;
 	int found = cd_present() && iso_lookup(abs, &e);
@@ -234,54 +245,57 @@ static void open_cd(const char *dos, const char *abs, int flags, const char *wha
 		fail_dos(2);
 		return;
 	}
-	if (e.dir || (flags & (O_WRONLY | O_RDWR | O_CREAT))) {
+	if (e.dir || mode != OPEN_READ) {
 		fail_dos(5);
 		return;
 	}
-	int h = new_handle(dup(iso_fd(wc_game_dir)));
+	int h = new_handle(CD_FILE);
 	if (h < 0) {
 		fail_dos(4);
 		return;
 	}
-	handle_path[h][0] = 0;
-	handle_changed[h] = 0;
-	cd_file[h].start = e.offset;
-	cd_file[h].size = e.size;
-	cd_file[h].pos = 0;
-	cd_file[h].open = 1;
+	handles[h].start = e.offset;
+	handles[h].size = e.size;
 	set_ax(h);
 	ok();
 }
 
-static void open_file(int flags, const char *what)
+static void open_file(open_mode mode, const char *what)
 {
 	char dos[128], abs[256], path[1024];
 	get_str(ds_dx(), dos, sizeof dos);
 	if (on_cd(dos, abs, sizeof abs)) {
-		open_cd(dos, abs, flags, what);
+		open_cd(dos, abs, mode, what);
 		return;
 	}
 	host_path(dos, path, sizeof path);
-	struct stat st;
-	int fd = !dos[0] ? (errno = ENOENT, -1)
-		: stat(path, &st) == 0 && S_ISDIR(st.st_mode) ? (errno = EACCES, -1) /* DOS can't open folders */
-		: open(path, flags, 0644);
+	std::error_code ec;
+	FILE *f = NULL;
+	if (!dos[0]) ec = error(std::errc::no_such_file_or_directory);
+	else if (fs::is_directory(path, ec)) ec = error(std::errc::permission_denied); /* DOS can't open folders */
+	else {
+		/* "r+" opens to write without emptying the file, as DOS does */
+		f = fopen(path, mode == CREATE ? "w+b" : mode == OPEN_READ ? "rb" : "r+b");
+		ec = f ? std::error_code() : std::error_code(errno, std::generic_category());
+	}
 	if (wc_trace) {
-		fprintf(stderr, "wc: %s \"%s\" -> %s%s", what, dos, path, fd < 0 ? " (failed)" : "");
+		fprintf(stderr, "wc: %s \"%s\" -> %s%s", what, dos, path, !f ? " (failed)" : "");
 		if (dos[0] && (unsigned char)dos[0] < 32) fprintf(stderr, " (first byte %02x)", (unsigned char)dos[0]);
 		fprintf(stderr, "\n");
 	}
-	if (fd < 0) {
-		fail_dos(dos_error());
+	if (!f) {
+		fail_dos(dos_error(ec));
 		return;
 	}
-	int h = new_handle(fd);
+	int h = new_handle(HOST_FILE);
 	if (h < 0) {
+		fclose(f);
 		fail_dos(4);
 		return;
 	}
-	snprintf(handle_path[h], sizeof handle_path[h], "%s", path);
-	handle_changed[h] = (flags & O_TRUNC) != 0;
+	handles[h].f = f;
+	handles[h].path = path;
+	handles[h].changed = mode == CREATE;
 	set_ax(h);
 	ok();
 }
@@ -363,35 +377,36 @@ static void find_next(void)
 		find_next_cd(pattern, attr, index);
 		return;
 	}
-	DIR *d = opendir(find_dir);
-	struct dirent *e;
-	for (uint32_t n = 0; d && (e = readdir(d)); n++) {
-		if (n < index || e->d_name[0] == '.') continue;
-		const char *dot = strchr(e->d_name, '.');
-		size_t base = dot ? (size_t)(dot - e->d_name) : strlen(e->d_name);
+	std::error_code ec;
+	uint32_t n = 0;
+	for (auto it = fs::directory_iterator(find_dir, ec); !ec && it != fs::directory_iterator(); it.increment(ec), n++) {
+		std::string file = it->path().filename().string();
+		const char *name = file.c_str();
+		if (n < index || name[0] == '.') continue;
+		const char *dot = strchr(name, '.');
+		size_t base = dot ? (size_t)(dot - name) : strlen(name);
 		if (base < 1 || base > 8 || (dot && (strlen(dot + 1) > 3 || strchr(dot + 1, '.')))) continue; /* not 8.3 */
 		char fcb[11];
-		to_fcb(e->d_name, fcb);
-		char path[1200];
-		struct stat st;
-		snprintf(path, sizeof path, "%s/%s", find_dir, e->d_name);
-		if (!fcb_match(pattern, fcb) || stat(path, &st) < 0) continue;
-		if (S_ISDIR(st.st_mode) && !(attr & 0x10)) continue;
-		struct tm tm;
-		localtime_r(&st.st_mtime, &tm);
-		M[dta + 0x15] = S_ISDIR(st.st_mode) ? 0x10 : 0x20;
+		to_fcb(name, fcb);
+		std::error_code e2;
+		bool dir = it->is_directory(e2);
+		auto mtime = it->last_write_time(e2);
+		if (!fcb_match(pattern, fcb) || e2) continue;
+		if (dir && !(attr & 0x10)) continue;
+		time_t t = std::chrono::system_clock::to_time_t(
+			std::chrono::time_point_cast<std::chrono::system_clock::duration>(std::chrono::file_clock::to_sys(mtime)));
+		struct tm tm = *localtime(&t);
+		M[dta + 0x15] = dir ? 0x10 : 0x20;
 		put(dta + 0x16, 2, tm.tm_hour << 11 | tm.tm_min << 5 | tm.tm_sec / 2);
 		put(dta + 0x18, 2, (tm.tm_year - 80) << 9 | (tm.tm_mon + 1) << 5 | tm.tm_mday);
-		put(dta + 0x1a, 4, (uint32_t)st.st_size);
+		put(dta + 0x1a, 4, dir ? 0 : (uint32_t)it->file_size(e2));
 		int i = 0;
-		for (const char *c = e->d_name; *c && i < 12; c++) M[dta + 0x1e + i++] = (uint8_t)toupper((unsigned char)*c);
+		for (const char *c = name; *c && i < 12; c++) M[dta + 0x1e + i++] = (uint8_t)toupper((unsigned char)*c);
 		M[dta + 0x1e + i] = 0;
 		put(dta + 12, 4, n + 1);
-		closedir(d);
 		ok();
 		return;
 	}
-	if (d) closedir(d);
 	fail_dos(0x12);
 }
 
@@ -528,13 +543,12 @@ static void dos(uint32_t at)
 		break;
 	case 0x3b: { /* change directory */
 		char dos[128], abs[256], path[1024];
-		struct stat st;
 		struct iso_entry e;
+		std::error_code ec;
 		get_str(ds_dx(), dos, sizeof dos);
 		int drive = dos_absolute(dos, abs, sizeof abs);
 		host_path(dos, path, sizeof path);
-		if (drive == DRIVE_CD ? !cd_present() || !iso_lookup(abs, &e) || !e.dir
-			: stat(path, &st) < 0 || !S_ISDIR(st.st_mode)) {
+		if (drive == DRIVE_CD ? !cd_present() || !iso_lookup(abs, &e) || !e.dir : !fs::is_directory(path, ec)) {
 			fail_dos(3);
 			break;
 		}
@@ -567,12 +581,21 @@ static void dos(uint32_t at)
 			break;
 		}
 		host_path(dos, path, sizeof path);
-		int r = ah == 0x39 ? mkdir(path, 0755) : rmdir(path);
-		if (wc_trace) {
-			fprintf(stderr, "wc: %s \"%s\" -> %s%s\n", ah == 0x39 ? "mkdir" : "rmdir", dos, path, r < 0 ? " (failed)" : "");
+		std::error_code ec;
+		if (ah == 0x39) {
+			if (!fs::create_directory(path, ec) && !ec) ec = error(std::errc::file_exists);
 		}
-		if (r < 0) {
-			fail_dos(errno == EEXIST ? 5 : dos_error());
+		else {
+			fs::file_status st = fs::status(path, ec);
+			if (!fs::exists(st)) ec = error(std::errc::no_such_file_or_directory);
+			else if (!fs::is_directory(st)) ec = error(std::errc::not_a_directory);
+			else fs::remove(path, ec); /* only when empty */
+		}
+		if (wc_trace) {
+			fprintf(stderr, "wc: %s \"%s\" -> %s%s\n", ah == 0x39 ? "mkdir" : "rmdir", dos, path, ec ? " (failed)" : "");
+		}
+		if (ec) {
+			fail_dos(dos_error(ec));
 		}
 		else {
 			ok();
@@ -580,46 +603,49 @@ static void dos(uint32_t at)
 		break;
 	}
 	case 0x3c: /* create */
-		open_file(O_RDWR | O_CREAT | O_TRUNC, "create");
+		open_file(CREATE, "create");
 		break;
 	case 0x3d: /* open */
-		open_file((AL & 3) == 0 ? O_RDONLY : (AL & 3) == 1 ? O_WRONLY : O_RDWR, "open");
+		open_file((AL & 3) == 0 ? OPEN_READ : (AL & 3) == 1 ? OPEN_WRITE : OPEN_RW, "open");
 		break;
 	case 0x3e: { /* close */
-		int fd = host_fd(BX);
-		if (fd < 0) {
+		handle *h = get_handle(BX);
+		if (!h) {
 			fail_dos(6);
 			break;
 		}
-		if (BX >= 5) {
-			close(fd);
-			handles[BX] = -1;
-			cd_file[BX].open = 0;
-			if (handle_changed[BX]) {
-				handle_changed[BX] = 0;
-				host_file_saved(handle_path[BX]);
-			}
+		if (BX >= FIRST_FILE) {
+			if (h->f) fclose(h->f);
+			if (h->changed) host_file_saved(h->path.c_str());
+			*h = handle{};
 		}
 		ok();
 		break;
 	}
 	case 0x3f: { /* read */
-		int fd = host_fd(BX);
-		if (fd < 0) {
+		handle *h = get_handle(BX);
+		if (!h) {
 			fail_dos(6);
 			break;
 		}
 		uint64_t n = count_cx(), base = ds_dx();
-		ssize_t got;
-		if (cd_file[BX].open) {
-			uint32_t left = cd_file[BX].pos < cd_file[BX].size ? cd_file[BX].size - cd_file[BX].pos : 0;
-			got = pread(fd, M + base, n < left ? n : left, (off_t)(cd_file[BX].start + cd_file[BX].pos));
-			if (got > 0) cd_file[BX].pos += (uint32_t)got;
+		size_t got = 0;
+		if (h->kind == CD_FILE) {
+			uint32_t left = h->pos < h->size ? h->size - h->pos : 0;
+			got = iso_read(M + base, n < left ? n : left, h->start + h->pos);
+			h->pos += (uint32_t)got;
+		}
+		else if (h->kind == HOST_FILE || h->kind == CON_IN) {
+			FILE *f = h->kind == CON_IN ? stdin : h->f;
+			fseek(f, 0, SEEK_CUR); /* between writing and reading */
+			got = fread(M + base, 1, n, f);
+			if (ferror(f)) {
+				clearerr(f);
+				fail_dos(5);
+				break;
+			}
 		}
 		else {
-			got = read(fd, M + base, n);
-		}
-		if (got < 0) {
 			fail_dos(5);
 			break;
 		}
@@ -628,27 +654,35 @@ static void dos(uint32_t at)
 		break;
 	}
 	case 0x40: { /* write */
-		int fd = host_fd(BX);
-		if (fd < 0) {
+		handle *h = get_handle(BX);
+		if (!h) {
 			fail_dos(6);
 			break;
 		}
 		uint64_t n = count_cx(), base = ds_dx();
-		if (cd_file[BX].open) {
+		size_t put = n;
+		if (h->kind == CD_FILE) {
 			fail_dos(5);
 			break;
 		}
-		if (fd <= 2) {
-			fflush(stdout);
+		if (h->kind == HOST_FILE) {
+			fseek(h->f, 0, SEEK_CUR); /* between reading and writing */
+			put = fwrite(M + base, 1, n, h->f);
+			fflush(h->f);
+			if (put < n && ferror(h->f)) {
+				clearerr(h->f);
+				fail_dos(5);
+				break;
+			}
+			h->changed = 1;
 		}
-		ssize_t put = fd == 1 && !dos_echo ? (ssize_t)n : write(fd, M + base, n);
-		if (put < 0) {
-			fail_dos(5);
-			break;
-		}
-		if (fd == 1 || fd == 2) vga_console(M + base, (size_t)put);
-		if (BX < MAX_HANDLES) {
-			handle_changed[BX] = 1;
+		else { /* the console */
+			FILE *out = h->kind == CON_ERR ? stderr : stdout;
+			if (out == stderr || dos_echo) {
+				fwrite(M + base, 1, n, out);
+				fflush(out);
+			}
+			vga_console(M + base, n);
 		}
 		set_ax(put);
 		ok();
@@ -662,8 +696,13 @@ static void dos(uint32_t at)
 			break;
 		}
 		host_path(dos, path, sizeof path);
-		if (unlink(path) < 0) {
-			fail_dos(dos_error());
+		std::error_code ec;
+		fs::file_status st = fs::symlink_status(path, ec);
+		if (!fs::exists(st)) ec = error(std::errc::no_such_file_or_directory);
+		else if (fs::is_directory(st)) ec = error(std::errc::permission_denied);
+		else fs::remove(path, ec);
+		if (ec) {
+			fail_dos(dos_error(ec));
 		}
 		else {
 			host_file_saved(path);
@@ -672,19 +711,18 @@ static void dos(uint32_t at)
 		break;
 	}
 	case 0x42: { /* seek */
-		int fd = host_fd(BX);
-		if (fd < 0) {
+		handle *h = get_handle(BX);
+		if (!h) {
 			fail_dos(6);
 			break;
 		}
-		off_t off = (off_t)(int32_t)((CX << 16) | DX);
-		off_t pos;
-		if (cd_file[BX].open) {
-			pos = off + (AL == 0 ? 0 : AL == 1 ? cd_file[BX].pos : cd_file[BX].size);
-			if (pos >= 0) cd_file[BX].pos = (uint32_t)pos;
+		int64_t off = (int32_t)((CX << 16) | DX), pos = -1;
+		if (h->kind == CD_FILE) {
+			pos = off + (AL == 0 ? 0 : AL == 1 ? h->pos : h->size);
+			if (pos >= 0) h->pos = (uint32_t)pos;
 		}
-		else {
-			pos = lseek(fd, off, AL == 0 ? SEEK_SET : AL == 1 ? SEEK_CUR : SEEK_END);
+		else if (h->kind == HOST_FILE) { /* DOS files stay below 2 GB: a long does */
+			if (!fseek(h->f, (long)off, AL == 0 ? SEEK_SET : AL == 1 ? SEEK_CUR : SEEK_END)) pos = ftell(h->f);
 		}
 		if (pos < 0) {
 			fail_dos(0x19);
@@ -697,7 +735,6 @@ static void dos(uint32_t at)
 	}
 	case 0x43: { /* get/set attributes */
 		char dos[128], abs[256], path[1024];
-		struct stat st;
 		get_str(ds_dx(), dos, sizeof dos);
 		if (on_cd(dos, abs, sizeof abs)) {
 			struct iso_entry e;
@@ -714,22 +751,23 @@ static void dos(uint32_t at)
 			break;
 		}
 		host_path(dos, path, sizeof path);
-		if (stat(path, &st) < 0) {
-			fail_dos(dos_error());
+		std::error_code ec;
+		fs::file_status st = fs::status(path, ec);
+		if (!fs::exists(st)) {
+			fail_dos(ec ? dos_error(ec) : 2);
 			break;
 		}
-		wr(R_CX, 2, S_ISDIR(st.st_mode) ? 0x10 : 0x20);
+		wr(R_CX, 2, fs::is_directory(st) ? 0x10 : 0x20);
 		ok();
 		break;
 	}
 	case 0x44: /* IOCTL */
 		if (AL == 0) { /* device information */
-			int fd = host_fd(BX);
-			if (fd < 0) {
+			if (!get_handle(BX)) {
 				fail_dos(6);
 				break;
 			}
-			wr(R_DX, 2, BX <= 4 ? 0x80d3 : 0x0002);
+			wr(R_DX, 2, BX < FIRST_FILE ? 0x80d3 : 0x0002);
 			ok();
 		}
 		else if (AL == 1) {
@@ -804,10 +842,11 @@ static void dos(uint32_t at)
 
 static uint64_t bios_ticks(void)
 {
-	struct timespec ts;
-	clock_gettime(CLOCK_REALTIME, &ts);
-	struct tm *tm = localtime(&ts.tv_sec);
-	double secs = tm->tm_hour * 3600 + tm->tm_min * 60 + tm->tm_sec + ts.tv_nsec / 1e9;
+	auto now = std::chrono::system_clock::now();
+	time_t t = std::chrono::system_clock::to_time_t(now);
+	struct tm *tm = localtime(&t);
+	double secs = tm->tm_hour * 3600 + tm->tm_min * 60 + tm->tm_sec +
+		std::chrono::duration<double>(now - std::chrono::system_clock::from_time_t(t)).count();
 	return (uint64_t)(secs * 1193180.0 / 65536.0);
 }
 

@@ -3,7 +3,6 @@
  * Cmd+F toggles full screen, Cmd+Up/Down change the speed (in flight the frame rate, elsewhere the
  * instruction rate), Cmd+Left/Right the mouse's speed in full screen (all shown in the title), Cmd+Q or closing the window quits. WC_HEADLESS=1: no
  * window. */
-#include <pthread.h>
 #include <cstdio>
 #include <cstdlib>
 
@@ -28,6 +27,12 @@ int host_has_mouse(void)
 {
 	const char *m = getenv("WC_MOUSE");
 	return window != NULL || (m && *m && *m != '0');
+}
+
+const char *host_base_dir(void)
+{
+	const char *dir = SDL_GetBasePath(); /* with a separator at the end */
+	return dir ? dir : ".";
 }
 
 void host_font(uint8_t glyphs[256 * 16]); /* font_ttf.cpp */
@@ -440,7 +445,7 @@ void host_file_saved(const char *path)
 
 /* ---- threads ---- */
 
-static void *game_thread(void *arg)
+static int SDLCALL game_thread(void *arg)
 {
 	((void (*)(void))arg)();
 	host_exit(0);
@@ -448,17 +453,21 @@ static void *game_thread(void *arg)
 
 [[noreturn]] void host_run(void (*game)(void))
 {
-	/* the recompiled code nests C calls as deeply as the game nests calls and interrupts */
-	pthread_attr_t attr;
-	pthread_attr_init(&attr);
-	pthread_attr_setstacksize(&attr, 256u << 20);
-	pthread_t thread;
-	if (pthread_create(&thread, &attr, game_thread, (void *)game)) {
-		fprintf(stderr, "wc: cannot start the game thread\n");
+	/* the recompiled code nests C calls as deeply as the game nests calls and interrupts: a stack
+	 * of 256 MB, which std::thread can't ask for, but SDL's threads can */
+	SDL_PropertiesID props = SDL_CreateProperties();
+	SDL_SetPointerProperty(props, SDL_PROP_THREAD_CREATE_ENTRY_FUNCTION_POINTER, (void *)game_thread);
+	SDL_SetPointerProperty(props, SDL_PROP_THREAD_CREATE_USERDATA_POINTER, (void *)game);
+	SDL_SetStringProperty(props, SDL_PROP_THREAD_CREATE_NAME_STRING, "game");
+	SDL_SetNumberProperty(props, SDL_PROP_THREAD_CREATE_STACKSIZE_NUMBER, 256 << 20);
+	SDL_Thread *thread = SDL_CreateThreadWithProperties(props);
+	SDL_DestroyProperties(props);
+	if (!thread) {
+		fprintf(stderr, "wc: cannot start the game thread (%s)\n", SDL_GetError());
 		exit(1);
 	}
 	if (!window) {
-		pthread_join(thread, NULL);
+		SDL_WaitThread(thread, NULL);
 		exit(0);
 	}
 	init_keys();

@@ -1,5 +1,6 @@
 /* The game's CD image (iso.cpp), read-only. */
 #pragma once
+#include <cstddef>
 #include <cstdint>
 
 struct iso_entry {
@@ -10,8 +11,10 @@ struct iso_entry {
 	char name[64];   /* upper case, without the ";1" version */
 };
 
-/* The image's file descriptor (opened on the first call), -1 if there is none. */
-int iso_fd(const char *game_dir);
+/* Whether there is an image (opened on the first call). */
+int iso_present(const char *game_dir);
+/* Up to n bytes of the image at offset into buf: the count read. */
+size_t iso_read(void *buf, size_t n, uint64_t offset);
 /* The entry at a path (no drive, backslashes or slashes, "" for the root): 1 if found. */
 int iso_lookup(const char *path, struct iso_entry *e);
 /* The index-th entry of a directory, without "." and "..": 1 if there is one. */

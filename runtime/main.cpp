@@ -26,16 +26,10 @@
  *   WC_JOYSTICK=0/1 never/always a joystick (by default while there is a game controller)
  *   WC_STICK_KEYS=b:key,...  keys a flight stick's buttons press (numbered as on the stick; default
  *                   3:enter,4:tab; "none" for none) */
-#include <libgen.h>
-#include <climits>
-#ifndef __EMSCRIPTEN__
-#include <mach-o/dyld.h>
-#endif
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <unistd.h>
 
 #include "host.h"
 #include "wc_rt.h"
@@ -73,23 +67,14 @@ static void on_signal(int sig)
 {
 	fprintf(stderr, "\nwc: stopped by signal %d\n", sig);
 	cpu_report(stderr);
-	_exit(128 + sig);
+	std::_Exit(128 + sig);
 }
 
 int main(int argc, char **argv)
 {
 	signal(SIGINT, on_signal);
 	signal(SIGTERM, on_signal);
-#ifdef __EMSCRIPTEN__
-	const char *dir = "/wc"; /* image.bin is embedded there */
-#else
-	char exe[PATH_MAX];
-	uint32_t size = sizeof exe;
-	if (_NSGetExecutablePath(exe, &size) != 0) {
-		snprintf(exe, sizeof exe, "%s", argv[0]);
-	}
-	const char *dir = dirname(exe);
-#endif
+	const char *dir = host_base_dir(); /* where image.bin is */
 
 	const char *trace = getenv("WC_TRACE");
 	wc_trace = trace ? atoi(trace) : 0;

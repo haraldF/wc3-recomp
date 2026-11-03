@@ -142,6 +142,11 @@ void host_file_saved(const char *path)
 	MAIN_THREAD_EM_ASM({ if (Module.fileSaved) Module.fileSaved(UTF8ToString($0)); }, path);
 }
 
+const char *host_base_dir(void)
+{
+	return "/wc"; /* image.bin is embedded there */
+}
+
 /* ---- threads ---- */
 
 /* The game exited (to DOS, or with an error). exit() wouldn't end the program, since the runtime is
