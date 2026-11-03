@@ -1,9 +1,15 @@
-/* The text mode's font (code page 437, 8x16) for the window, made at startup: drawn from Menlo with
- * Core Text (other fonts where Menlo lacks a character), without the VGA BIOS's font. The line and
- * block characters (B0h-DFh) are drawn here, so that they join from cell to cell. */
-#include <CoreText/CoreText.h>
+/* The text mode's font (code page 437, 8x16) for the window, made at startup from a TrueType font
+ * with SDL_ttf: font.ttf next to the executable (CMake copies it from fonts/), or WC_FONT. There is
+ * no VGA BIOS font here. The line and block characters (B0h-DFh) are drawn here, so that they join
+ * from cell to cell whatever the font. */
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <string>
+
+#include <SDL3/SDL.h>
+#include <SDL3_ttf/SDL_ttf.h>
 
 static const char *const cp437 =
 	" ☺☻♥♦♣♠•◘○◙♂♀♪♫☼►◄↕‼¶§▬↨↑↓→←∟↔▲▼"
@@ -62,46 +68,70 @@ static void draw_box(uint8_t *g, unsigned c)
 	horizontal(right, v == 2 ? 2 : 3, 7);
 }
 
-/* The 256 characters, 16 bytes each (a row a byte, bit 7 the leftmost pixel). */
+/* The next character of a UTF-8 string. */
+static uint32_t next_char(const char *&p)
+{
+	uint8_t c = (uint8_t)*p++;
+	int more = c >= 0xf0 ? 3 : c >= 0xe0 ? 2 : c >= 0xc0 ? 1 : 0;
+	uint32_t ch = more ? c & (0x3f >> more) : c;
+	while (more--) ch = ch << 6 | ((uint8_t)*p++ & 0x3f);
+	return ch;
+}
+
+/* The largest size whose lines fit 16 pixels and whose characters fit 8 (a font drawn for 8x16
+ * cells, such as a VGA font's outline, fits at 16 exactly). */
+static TTF_Font *open_fitting(const char *path)
+{
+	for (float size = 16; size >= 8; size -= 0.5f) {
+		TTF_Font *font = TTF_OpenFont(path, size);
+		if (!font) return NULL;
+		int advance = 0;
+		TTF_GetGlyphMetrics(font, 'M', NULL, NULL, NULL, NULL, &advance);
+		if (TTF_GetFontHeight(font) <= 16 && advance <= 8) return font;
+		TTF_CloseFont(font);
+	}
+	return NULL;
+}
+
+/* The 256 characters, 16 bytes each (a row a byte, bit 7 the leftmost pixel). Without a font only
+ * the line and block characters are there. */
 void host_font(uint8_t glyphs[256 * 16])
 {
 	memset(glyphs, 0, 256 * 16);
-	CTFontRef font = CTFontCreateWithName(CFSTR("Menlo-Regular"), 14, NULL);
-	CGColorSpaceRef gray = CGColorSpaceCreateDeviceGray();
-	uint8_t bits[16 * 8];
-	CGContextRef cg = CGBitmapContextCreate(bits, 8, 16, 8, 8, gray, kCGImageAlphaNone);
-	CGContextSetGrayFillColor(cg, 1, 1);
-	CGFloat baseline = (CGFloat)(int)(CTFontGetDescent(font) + 0.5) + 1; /* from the cell's bottom */
-	const void *keys[] = { kCTFontAttributeName, kCTForegroundColorFromContextAttributeName };
-	const void *values[] = { font, kCFBooleanTrue };
-	CFDictionaryRef attrs = CFDictionaryCreate(NULL, keys, values, 2, &kCFTypeDictionaryKeyCallBacks,
-		&kCFTypeDictionaryValueCallBacks);
+	for (unsigned c = 0xb0; c <= 0xdf; c++) draw_box(glyphs + c * 16, c);
+	const char *env = getenv("WC_FONT");
+	std::string path = env && *env ? env : std::string(SDL_GetBasePath()) + "font.ttf";
+	if (!TTF_Init()) return;
+	TTF_Font *font = open_fitting(path.c_str());
+	if (!font) {
+		fprintf(stderr, "wc: no font for text mode (%s: %s); put a TrueType font in fonts/ and build again\n",
+			path.c_str(), SDL_GetError());
+		TTF_Quit();
+		return;
+	}
+	int top = (16 - TTF_GetFontHeight(font)) / 2; /* the line's place in the cell */
+	const SDL_Color white = { 255, 255, 255, 255 };
 	const char *p = cp437;
 	for (unsigned c = 0; c < 256; c++) {
-		size_t n = 1;
-		while ((p[n] & 0xc0) == 0x80) n++;
-		uint8_t *g = glyphs + c * 16;
-		if (c >= 0xb0 && c <= 0xdf) draw_box(g, c);
-		else if (*p != ' ') {
-			CFStringRef s = CFStringCreateWithBytes(NULL, (const UInt8 *)p, (CFIndex)n, kCFStringEncodingUTF8, false);
-			CFAttributedStringRef text = CFAttributedStringCreate(NULL, s, attrs);
-			CTLineRef line = CTLineCreateWithAttributedString(text);
-			memset(bits, 0, sizeof bits);
-			CGContextSetTextPosition(cg, (8 - CTLineGetTypographicBounds(line, NULL, NULL, NULL)) / 2, baseline);
-			CTLineDraw(line, cg);
-			for (int y = 0; y < 16; y++) {
-				for (int x = 0; x < 8; x++) {
-					if (bits[y * 8 + x] >= 100) set(g, x, y); /* from the smoothed picture */
+		uint32_t ch = next_char(p);
+		if ((c >= 0xb0 && c <= 0xdf) || ch == ' ' || !TTF_FontHasGlyph(font, ch)) continue;
+		SDL_Surface *s = TTF_RenderGlyph_Blended(font, ch, white);
+		SDL_Surface *rgba = s ? SDL_ConvertSurface(s, SDL_PIXELFORMAT_RGBA32) : NULL;
+		if (rgba) {
+			int left = (8 - rgba->w) / 2;
+			for (int y = 0; y < rgba->h; y++) {
+				const uint8_t *row = (const uint8_t *)rgba->pixels + y * rgba->pitch;
+				for (int x = 0; x < rgba->w; x++) {
+					int cx = left + x, cy = top + y;
+					if (row[x * 4 + 3] >= 100 && cx >= 0 && cx < 8 && cy >= 0 && cy < 16) {
+						set(glyphs + c * 16, cx, cy); /* from the smoothed glyph */
+					}
 				}
 			}
-			CFRelease(line);
-			CFRelease(text);
-			CFRelease(s);
 		}
-		p += n;
+		SDL_DestroySurface(rgba);
+		SDL_DestroySurface(s);
 	}
-	CFRelease(attrs);
-	CGContextRelease(cg);
-	CGColorSpaceRelease(gray);
-	CFRelease(font);
+	TTF_CloseFont(font);
+	TTF_Quit();
 }

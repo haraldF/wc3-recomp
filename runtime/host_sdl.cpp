@@ -30,7 +30,7 @@ int host_has_mouse(void)
 	return window != NULL || (m && *m && *m != '0');
 }
 
-void host_font(uint8_t glyphs[256 * 16]); /* font_mac.cpp */
+void host_font(uint8_t glyphs[256 * 16]); /* font_ttf.cpp */
 
 int host_open(void)
 {

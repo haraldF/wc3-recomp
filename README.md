@@ -24,10 +24,15 @@ releases are refused.
 Prerequisites (Homebrew):
 
 ```bash
-brew install node ghidra cmake ninja sdl3   # Node 23.6 or later; Ghidra 12.2 brings its JDK
-git submodule update --init                 # Nuked-OPL3 and munt, for AdLib and MT-32 sound
+brew install node ghidra cmake ninja sdl3 sdl3_ttf   # Node 23.6 or later; Ghidra 12.2 brings its JDK
+git submodule update --init                          # Nuked-OPL3 and munt, for AdLib and MT-32 sound
 npm ci
 ```
+
+Text mode (the joystick calibration screen) is drawn with the TrueType font in `fonts/`:
+`Px437_IBM_VGA_8x16.ttf` from VileR's [Ultimate Oldschool PC Font Pack](https://int10h.org/oldschool-pc-fonts/)
+(CC BY-SA 4.0, see `fonts/README.md`), made for exactly these 8x16 cells. Any monospaced font with
+the DOS characters works instead (DejaVu Sans Mono, for one); `WC_FONT=file.ttf` picks one at run time.
 
 Then, with GOG's game folder at `../game3` (or `-- --iso path/to/DATA.DAT` for every step):
 

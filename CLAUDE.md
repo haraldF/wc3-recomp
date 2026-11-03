@@ -67,9 +67,11 @@ generated and ignored.
   0-15 as the BIOS sets them; no attribute controller mapping, blink shown steady), the cursor from
   the BIOS data area (40:50h, shape 40:60h; the game hides it with AH=01h). The game writes the grid
   into B8000h and prints through DOS (handle 1, the C library adds CR): DOS console output goes
-  through a BIOS teletype there too, with AH=02h/03h positioning. No VGA BIOS font: `font_mac.cpp`
-  draws code page 437 from Menlo (14 px, Core Text, threshold 100 on the smoothed glyphs), the line
-  and block characters B0h-DFh by hand so they join; the web build has none yet (text mode blank).
+  through a BIOS teletype there too, with AH=02h/03h positioning. No VGA BIOS font: `font_ttf.cpp`
+  draws code page 437 from a TrueType font with SDL_ttf (`fonts/*.ttf`, copied to `out/bin/font.ttf`;
+  `WC_FONT` overrides): the largest size whose line fits 16 pixels and 'M' 8, threshold 100 on the
+  smoothed glyphs, no fallback for characters the font lacks; the line and block characters
+  B0h-DFh by hand so they join. Without a font only those show. The web build has none yet.
   Text doesn't end the quick start (only a visible graphics picture does).
 - Movies at 640x480 are 240 lines, shown doubled: the game sets bit 7 of CRTC register 9 (3D4h/3D5h,
   maximum scan line) and toggles the sequencer's screen-off bit (3C4h index 1, bit 5). Ignored,
