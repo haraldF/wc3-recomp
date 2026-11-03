@@ -412,11 +412,18 @@ static uint8_t console_char(uint32_t at)
 }
 
 void vga_console(const uint8_t *s, size_t n);
+void vga_print_text(FILE *f);
 
-/* A character to the console: the terminal, and the screen in text mode. */
+/* The console's output goes to the terminal only without a window: the window shows text mode,
+ * and the game rewrites lines in place there (the joystick calibration's reading, after AH=02h),
+ * which in a terminal became an endless stream. What is on the screen at the exit is printed
+ * then, as DOS would leave it. */
+int dos_echo = 1;
+
+/* A character to the console: the screen in text mode, and the terminal without a window. */
 static void console_out(uint8_t c)
 {
-	putchar(c);
+	if (dos_echo) putchar(c);
 	vga_console(&c, 1);
 }
 
@@ -634,7 +641,7 @@ static void dos(uint32_t at)
 		if (fd <= 2) {
 			fflush(stdout);
 		}
-		ssize_t put = write(fd, M + base, n);
+		ssize_t put = fd == 1 && !dos_echo ? (ssize_t)n : write(fd, M + base, n);
 		if (put < 0) {
 			fail_dos(5);
 			break;
@@ -745,6 +752,7 @@ static void dos(uint32_t at)
 		ok();
 		break;
 	case 0x4c: /* exit */
+		if (!dos_echo) vga_print_text(stdout);
 		fflush(stdout);
 		wc_dump_memory("the program exited");
 		if (wc_trace) {

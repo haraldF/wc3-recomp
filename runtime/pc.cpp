@@ -879,8 +879,11 @@ int bios_far_call(uint32_t seg_off, uint32_t at)
 /* ---- setup ---- */
 
 /* tty: also take keys typed in the terminal (when there is no window) */
+extern int dos_echo;
+
 void pc_init(int tty)
 {
+	dos_echo = tty; /* with a window, DOS's output is on its text screen only */
 	for (int n = 0; n < 256; n++) {
 		mwr(n * 4, 2, (uint64_t)n);
 		mwr(n * 4 + 2, 2, BIOS_SEG);

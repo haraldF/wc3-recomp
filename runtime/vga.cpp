@@ -185,6 +185,29 @@ void vga_console(const uint8_t *s, size_t n)
 	for (size_t i = 0; i < n; i++) teletype(s[i]);
 }
 
+/* The text screen's lines up to the last one with something on it (other characters than ASCII as
+ * '?'), when in text mode. */
+void vga_print_text(FILE *f)
+{
+	if (!text_mode()) return;
+	int last = -1;
+	for (int row = 0; row < 25; row++) {
+		for (int col = 0; col < 80; col++) {
+			if (M[0xb8000 + (row * 80 + col) * 2] > ' ') last = row;
+		}
+	}
+	for (int row = 0; row <= last; row++) {
+		char line[81];
+		int n = 0;
+		for (int col = 0; col < 80; col++) {
+			uint8_t c = M[0xb8000 + (row * 80 + col) * 2];
+			line[n++] = c >= ' ' && c < 0x7f ? (char)c : c ? '?' : ' ';
+		}
+		while (n && line[n - 1] == ' ') n--;
+		fprintf(f, "%.*s\n", n, line);
+	}
+}
+
 /* ---- frames for the host ---- */
 
 /* The picture as it is now: its width and height, the pixels into buf (up to 640x480 bytes). */

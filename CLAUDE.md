@@ -72,7 +72,10 @@ generated and ignored.
   `WC_FONT` overrides): the largest size whose line fits 16 pixels and 'M' 8, threshold 100 on the
   smoothed glyphs, no fallback for characters the font lacks; the line and block characters
   B0h-DFh by hand so they join. Without a font only those show. The web build has none yet.
-  Text doesn't end the quick start (only a visible graphics picture does).
+  Text doesn't end the quick start (only a visible graphics picture does). With a window, DOS's
+  console output goes to the text screen only (`dos_echo`): the calibration rewrites its reading in
+  place, which flooded the terminal; the text screen is printed to the terminal at the exit instead.
+  Headless, it still goes to the terminal too.
 - Movies at 640x480 are 240 lines, shown doubled: the game sets bit 7 of CRTC register 9 (3D4h/3D5h,
   maximum scan line) and toggles the sequencer's screen-off bit (3C4h index 1, bit 5). Ignored,
   they filled the top 200 lines. `vga_picture` repeats lines by register 9.
