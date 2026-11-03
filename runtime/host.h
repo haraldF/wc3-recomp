@@ -30,6 +30,10 @@ int pc_in_flight(void);
 void pc_mouse(int x, int y, int buttons);
 /* Mouse movement by dx, dy picture pixels from wherever the pointer is (full screen). */
 void pc_mouse_move(int dx, int dy, int buttons);
+/* Where the host should move its pointer (x 0..319, y 0..199 over the picture): returns 1 when the
+ * program moved the mouse's pointer or changed its range. Positions sent before the host moved its
+ * pointer are ignored then (a host that never calls this keeps them all). */
+int pc_mouse_warp(int *x, int *y);
 /* The game controller as joystick A: x and y -1000..1000 (0 centred, -1000 left and up); roll
  * likewise (a flight stick's twist, -1000 to the left), which the PC joystick doesn't have: it sets
  * the roll rate in flight; buttons: 1 and 2 the joystick's buttons. */

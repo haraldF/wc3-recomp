@@ -105,7 +105,12 @@ generated and ignored.
   (push/pop, mov/xor, prefixes, RETF; it reports anything else) whenever the state changes. The
   game sets the range to 640x480, but 0..1278 in flight (two units a pixel): the window covers the
   last range set from 0 (one starting further in only confines the pointer). Keeping the largest
-  made the options screen (Alt-O, 0..640) put the pointer at twice the x.
+  made the options screen (Alt-O, 0..640) put the pointer at twice the x. A real driver keeps its
+  numbers when the range changes: flight starts where "Fly MISSION." was clicked (about x 600 of
+  0..639), near the middle of 0..1278. Mapping the window afresh put it at the right edge (~1200)
+  and the ship turned from the start. So on a range change or AX=4 the host moves the Mac's
+  (hidden) pointer to the program's (`pc_mouse_warp`, SDL_WarpMouseInWindow; not in full screen,
+  which is relative anyway), and positions sent before that are ignored.
 - Hangar (Esc twice): hotspots show a label at the bottom when hovered ("Go to FLIGHT CONTROL." along
   the bottom edge, y 185 of 200); Alt-X asks "Exit to DOS (Y/N)?".
   `WC_MOUSE=1 WC_KEYS=3000:+esc,3006:-esc,5000:+esc,5006:-esc,9000:@160.185,9300:@160.185,

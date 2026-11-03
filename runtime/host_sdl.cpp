@@ -246,6 +246,21 @@ static void mouse(const SDL_Event *e)
 	pc_mouse(x, y, buttons);
 }
 
+/* The program put its pointer somewhere (mouse.cpp): the Mac's pointer goes there too, so that
+ * moving it goes on from there. Not in full screen, where only the movement counts. */
+static void warp_mouse(void)
+{
+	int x, y;
+	if (!pc_mouse_warp(&x, &y)) return;
+	if (SDL_GetWindowRelativeMouseMode(window) || SDL_GetMouseFocus() != window || shown_at.w <= 0) return;
+	SDL_PumpEvents();
+	SDL_FlushEvent(SDL_EVENT_MOUSE_MOTION); /* from before: stale */
+	float wx, wy;
+	SDL_RenderCoordinatesToWindow(renderer, shown_at.x + ((float)x + 0.5f) * shown_at.w / 320,
+		shown_at.y + ((float)y + 0.5f) * shown_at.h / 200, &wx, &wy);
+	SDL_WarpMouseInWindow(window, wx, wy);
+}
+
 /* ---- game controllers and joysticks as joystick A: a gamepad's left stick (or d-pad) and two
  * buttons, a joystick's first two axes and buttons; the right stick's x (or WC_ROLL_AXIS) rolls ---- */
 
@@ -451,6 +466,7 @@ static void *game_thread(void *arg)
 	SDL_HideCursor(); /* the game draws its own */
 	for (;;) {
 		SDL_Event e;
+		warp_mouse();
 		while (SDL_PollEvent(&e)) {
 			switch (e.type) {
 			case SDL_EVENT_QUIT: exit(0);

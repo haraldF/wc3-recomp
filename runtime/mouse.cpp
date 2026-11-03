@@ -1,6 +1,6 @@
 /* The mouse driver (INT 33h), fed from the host's window. Positions are in the driver's virtual
  * screen, which in mode 13h is 640x200 (x doubled), like Microsoft's driver; the window covers it,
- * or the largest range the program has set (Wing Commander III sets 640x480). */
+ * or the last range the program has set from 0 (Wing Commander III sets 640x480). */
 #include <atomic>
 #include <cstdio>
 
@@ -8,9 +8,19 @@
 #include "wc_rt.h"
 
 /* Events from the host, on its thread: a single-producer, single-consumer ring. */
-static struct { int16_t x, y; uint8_t buttons, relative; } events[256];
+static struct { int16_t x, y; uint8_t buttons, relative; uint32_t warp; } events[256];
 static std::atomic<uint32_t> events_head, events_tail;
 static std::atomic<int> mouse_seen; /* the host had a mouse event: the driver reports a mouse */
+
+/* In the window the pointer is where the Mac's is over the picture. When the program puts it
+ * somewhere (AX=4), or changes the range so that the same place means another position, a real
+ * driver's pointer stays at its numbers: the host moves the Mac's pointer there instead
+ * (pc_mouse_warp). Without that, flight (range 0..1278) began with the pointer where "Fly MISSION."
+ * was clicked, at the right edge, and the ship turned. Positions the host sent before it moved the
+ * pointer are stale then. */
+static std::atomic<uint32_t> warp_wanted, warp_done; /* requests made, and taken by the host */
+static std::atomic<int> warp_x, warp_y;               /* where to, in the window's 320x200 */
+static std::atomic<int> host_warps;                   /* the host moves its pointer */
 
 static void post(int x, int y, int buttons, int relative)
 {
@@ -20,6 +30,7 @@ static void post(int x, int y, int buttons, int relative)
 		events[tail % 256].y = (int16_t)y;
 		events[tail % 256].buttons = (uint8_t)buttons;
 		events[tail % 256].relative = (uint8_t)relative;
+		events[tail % 256].warp = warp_done.load(std::memory_order_relaxed);
 		events_tail.store(tail + 1, std::memory_order_release);
 	}
 	mouse_seen.store(1);
@@ -29,6 +40,17 @@ void pc_warp_end(void);
 void pc_mouse(int x, int y, int buttons) { if (buttons) pc_warp_end(); post(x, y, buttons, 0); }
 void mouse_post(int x, int y, int buttons) { post(x, y, buttons, 0); } /* WC_KEYS: no warp end */
 void pc_mouse_move(int dx, int dy, int buttons) { if (buttons) pc_warp_end(); post(dx, dy, buttons, 1); }
+
+int pc_mouse_warp(int *x, int *y)
+{
+	host_warps.store(1);
+	uint32_t wanted = warp_wanted.load(std::memory_order_acquire);
+	if (wanted == warp_done.load(std::memory_order_relaxed)) return 0;
+	*x = warp_x.load();
+	*y = warp_y.load();
+	warp_done.store(wanted, std::memory_order_release);
+	return 1;
+}
 
 static int x, y = 100, min_x, max_x = 639, min_y, max_y = 199;
 /* What the window's 320x200 covers: the last range set from 0 (WC3 sets 0..1278 in flight, 0..640
@@ -145,6 +167,11 @@ static void drain(void)
 		int ex = events[head % 256].x, ey = events[head % 256].y;
 		int sx = ex * virt_w / 320, sy = ey * virt_h / 200;
 		int nx = events[head % 256].relative ? x + sx : sx, ny = events[head % 256].relative ? y + sy : sy;
+		if (!events[head % 256].relative && events[head % 256].warp != warp_wanted.load(std::memory_order_relaxed) &&
+		    host_warps.load()) {
+			nx = x; /* from before the host moved its pointer: only the buttons count */
+			ny = y;
+		}
 		nx = clamp(nx, min_x, max_x);
 		ny = clamp(ny, min_y, max_y);
 		uint8_t nb = events[head % 256].buttons;
@@ -200,6 +227,14 @@ void mouse_poll(void)
 	if (!real_call(handler_seg, handler_off, r)) handler_mask = 0;
 }
 
+/* The host's pointer to where the program's is now. */
+static void want_warp(void)
+{
+	warp_x.store(x * 320 / virt_w);
+	warp_y.store(y * 200 / virt_h);
+	warp_wanted.fetch_add(1, std::memory_order_release);
+}
+
 void mouse_int(uint32_t at)
 {
 	uint16_t ax = (uint16_t)rd(R_AX, 2), bx = (uint16_t)rd(R_BX, 2), cx = (uint16_t)rd(R_CX, 2),
@@ -234,6 +269,7 @@ void mouse_int(uint32_t at)
 	case 0x04: /* set position */
 		x = clamp((int16_t)cx, min_x, max_x);
 		y = clamp((int16_t)dx, min_y, max_y);
+		want_warp();
 		break;
 	case 0x05: /* button press information */
 	case 0x06: { /* button release information */
@@ -258,12 +294,14 @@ void mouse_int(uint32_t at)
 		max_x = (int16_t)(cx < dx ? dx : cx);
 		if (min_x <= 0 && max_x > 0) virt_w = max_x + 1;
 		x = clamp(x, min_x, max_x);
+		want_warp();
 		break;
 	case 0x08: /* vertical range */
 		min_y = (int16_t)(cx < dx ? cx : dx);
 		max_y = (int16_t)(cx < dx ? dx : cx);
 		if (min_y <= 0 && max_y > 0) virt_h = max_y + 1;
 		y = clamp(y, min_y, max_y);
+		want_warp();
 		break;
 	case 0x0b: /* motion counters */
 		wr(R_CX, 2, (uint16_t)mickey_x);
