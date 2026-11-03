@@ -14,6 +14,9 @@ int host_open(void);
  * into w and h) and the 6-bit palette, taken at vertical retrace. Returns a count that changes with
  * every frame. */
 uint64_t vga_frame(uint8_t pixels[640 * 480], uint8_t palette[256 * 3], int *w, int *h);
+/* The font text mode is drawn with (256 characters of 8x16, a byte a row), from the host. Without
+ * one, text mode shows nothing. */
+void vga_font(const uint8_t glyphs[256 * 16]);
 /* A scancode (set 1: make code, | 0x80 for the break code) from the keyboard. */
 void pc_key(uint8_t scancode);
 /* CPU speed in instructions per millisecond (0: unlimited); change > 0 raises it by 20%, < 0

@@ -44,8 +44,10 @@ generated and ignored.
   exit (183,152), then `%x.y` (checked: the ship turns, the pilot's hand moves).
 - With a joystick present (ours is while the host has a controller; `WC_JOYSTICK=1` always, `=0`
   never) and no `WC3\JOY0.DAT`, it calibrates in text mode: the prompts (centre, top left, bottom
-  right, each + a button, then Esc) go to the terminal between endless "Joystick val (x, y)" lines;
-  any other key skips it. It times the one-shots with the PIT (bc998, channel 0 read-back), so they
+  right, each + a button, then Esc) under a grid, the reading printed again and again ("Joystick
+  val (x, y)", also in the terminal); any other key skips it. Alt-J (hangar, flight) shows the same
+  screen (a240, called from five places), ending with the scaled reading, (0, 0) when centred, until
+  Esc: in the window it was black, which looked like a hang. It times the one-shots with the PIT (bc998, channel 0 read-back), so they
   last emulated time, and the speed limit doesn't sleep during one: before, the stick was always
   there and a sleep in the middle gave readings like 20829 instead of 48. It reads the PIT with the
   8254 read-back command (C2h: status, then count; the status' output bit tells the halves of a
@@ -61,6 +63,14 @@ generated and ignored.
   at A0000h out and the new bank in. Frames carry their size (`vga_frame`); `WC_SCREENSHOT` files
   hold 640x480 pixels then. The mouse stays in 320x200 terms, scaled to the game's 640x480 range,
   so the hotspot positions below hold in both modes.
+- Text mode (modes 0-3, `vga.cpp`): 80x25 from B8000h drawn at 640x400 with the EGA colours (DAC
+  0-15 as the BIOS sets them; no attribute controller mapping, blink shown steady), the cursor from
+  the BIOS data area (40:50h, shape 40:60h; the game hides it with AH=01h). The game writes the grid
+  into B8000h and prints through DOS (handle 1, the C library adds CR): DOS console output goes
+  through a BIOS teletype there too, with AH=02h/03h positioning. No VGA BIOS font: `font_mac.cpp`
+  draws code page 437 from Menlo (14 px, Core Text, threshold 100 on the smoothed glyphs), the line
+  and block characters B0h-DFh by hand so they join; the web build has none yet (text mode blank).
+  Text doesn't end the quick start (only a visible graphics picture does).
 - Movies at 640x480 are 240 lines, shown doubled: the game sets bit 7 of CRTC register 9 (3D4h/3D5h,
   maximum scan line) and toggles the sequencer's screen-off bit (3C4h index 1, bit 5). Ignored,
   they filled the top 200 lines. `vga_picture` repeats lines by register 9.
@@ -210,7 +220,7 @@ generated and ignored.
 At 640x480 (VESA): the intro and credits with their digital sound on the SB16, the hangar and
 Flight Control with the mouse, General MIDI music on macOS, loading a save at a Main Terminal,
 take-off, flight with the backdrop, autopilot, guns, targeting and missiles (scripted, no crash).
-Missing: text mode in the window, General MIDI in the browser, the web page (`web/` is still
+Text mode (joystick calibration) in the window. Missing: text mode's font and General MIDI in the browser, the web page (`web/` is still
 wc-decomp's; `web_frame_width/height` give the frame's size).
 
 ## Conventions

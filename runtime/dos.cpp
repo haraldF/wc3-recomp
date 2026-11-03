@@ -411,6 +411,15 @@ static uint8_t console_char(uint32_t at)
 	return (uint8_t)key;
 }
 
+void vga_console(const uint8_t *s, size_t n);
+
+/* A character to the console: the terminal, and the screen in text mode. */
+static void console_out(uint8_t c)
+{
+	putchar(c);
+	vga_console(&c, 1);
+}
+
 static void dos(uint32_t at)
 {
 	uint8_t ah = (uint8_t)AH;
@@ -420,17 +429,17 @@ static void dos(uint32_t at)
 	}
 	switch (ah) {
 	case 0x02: /* write character */
-		putchar((int)rd(R_DL, 1));
+		console_out((uint8_t)rd(R_DL, 1));
 		break;
 	case 0x09: { /* write $-terminated string */
 		for (uint32_t a = ds_dx(); M[a] != '$'; a++) {
-			putchar(M[a]);
+			console_out(M[a]);
 		}
 		break;
 	}
 	case 0x01: /* read a character with echo */
 		wr(R_AL, 1, console_char(at));
-		putchar((int)AL);
+		console_out((uint8_t)AL);
 		fflush(stdout);
 		break;
 	case 0x06: /* direct console I/O: DL = FF reads without waiting (ZF set if none) */
@@ -441,7 +450,7 @@ static void dos(uint32_t at)
 			wr(R_AL, 1, have ? console_char(at) : 0);
 		}
 		else {
-			putchar((int)DL);
+			console_out((uint8_t)DL);
 		}
 		break;
 	case 0x07: case 0x08: /* read a character without echo */
@@ -630,6 +639,7 @@ static void dos(uint32_t at)
 			fail_dos(5);
 			break;
 		}
+		if (fd == 1 || fd == 2) vga_console(M + base, (size_t)put);
 		if (BX < MAX_HANDLES) {
 			handle_changed[BX] = 1;
 		}

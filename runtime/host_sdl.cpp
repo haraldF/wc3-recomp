@@ -30,8 +30,13 @@ int host_has_mouse(void)
 	return window != NULL || (m && *m && *m != '0');
 }
 
+void host_font(uint8_t glyphs[256 * 16]); /* font_mac.cpp */
+
 int host_open(void)
 {
+	static uint8_t glyphs[256 * 16];
+	host_font(glyphs); /* also headless, for WC_SCREENSHOT */
+	vga_font(glyphs);
 	const char *headless = getenv("WC_HEADLESS");
 	if (headless && *headless && *headless != '0') return 0;
 	/* macOS's GameController framework claims HID joysticks such as flight sticks without reporting

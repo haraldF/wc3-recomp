@@ -7,8 +7,8 @@ native macOS program with an emulated PC around it.
 The game is fully playable on macOS, at 640x480 with its movies, digital sound and General MIDI
 music. Some code addresses may still be missing: code reached only through pointers is found by
 running it, so a part of the game nobody has played yet can stop with `wc: missing code at X`
-(see below). Still to do: text mode in the window (joystick calibration prompts go to the
-terminal), and the web build (`web/` is still wc-decomp's, with no General MIDI).
+(see below). Still to do: the web build (`web/` is still wc-decomp's, with no General MIDI and no
+font for text mode, which the joystick calibration uses).
 
 It grew out of wc-decomp, the same for Wing Commander I and II (16-bit real-mode programs): the
 PC emulation (`runtime/`: DOS, BIOS, timer, keyboard, mouse, VGA, AdLib, MT-32, General MIDI, Sound Blaster, the

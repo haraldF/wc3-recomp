@@ -1,7 +1,8 @@
 /* VGA: the DAC (palette), the status register's blanking and retrace bits in real time, and the
  * frames the host shows, copied from the frame buffer at each vertical retrace: mode 13h, or the
  * VESA (VBE 1.2) mode 101h, 640x480 with 256 colours, banked through the 64 KB window at A0000h
- * (Wing Commander III's VESA480.DLL; without it, MCGA.DLL at 320x200). WC_VESA=0: no VESA BIOS. */
+ * (Wing Commander III's VESA480.DLL; without it, MCGA.DLL at 320x200), or text mode (the joystick
+ * calibration) at 640x400 with the host's font. WC_VESA=0: no VESA BIOS. */
 #include <pthread.h>
 #include <cstdio>
 #include <cstdlib>
@@ -85,12 +86,116 @@ void vga_window_function(void)
 	else wr(R_DX, 2, bank);
 }
 
+/* ---- text mode (modes 0-3): 80x25 characters and attributes at B8000h, 640x400 pixels ---- */
+
+static uint8_t font[256][16];
+static int have_font;
+
+void vga_font(const uint8_t glyphs[256 * 16])
+{
+	memcpy(font, glyphs, sizeof font);
+	have_font = 1;
+}
+
+static int text_mode(void)
+{
+	return !svga && M[0x449] <= 3;
+}
+
+/* the cursor (page 0) and its shape, in the BIOS data area */
+static unsigned cursor_col(void) { return M[0x450]; }
+static unsigned cursor_row(void) { return M[0x451]; }
+static void cursor_to(unsigned row, unsigned col) { M[0x450] = (uint8_t)col; M[0x451] = (uint8_t)row; }
+
+static void text_picture(uint8_t *buf)
+{
+	const uint8_t *cell = M + 0xb8000;
+	/* the cursor blinks (about 4 times a second), unless hidden (start line bit 5) */
+	int cursor = !(M[0x461] & 0x20) && pc_now_ns() / 266000000u % 2 == 0;
+	for (unsigned row = 0; row < 25; row++) {
+		for (unsigned col = 0; col < 80; col++, cell += 2) {
+			uint8_t fg = cell[1] & 0x0f, bg = (cell[1] >> 4) & 7; /* bit 7: blinking, shown steady */
+			const uint8_t *glyph = font[cell[0]];
+			int under = cursor && row == cursor_row() && col == cursor_col();
+			for (unsigned y = 0; y < 16; y++) {
+				uint8_t bits = have_font ? glyph[y] : 0;
+				if (under && y >= 14) bits = 0xff;
+				uint8_t *out = buf + (row * 16 + y) * 640 + col * 8;
+				for (unsigned x = 0; x < 8; x++) out[x] = bits & (0x80 >> x) ? fg : bg;
+			}
+		}
+	}
+}
+
+static void text_scroll_up(unsigned lines, uint8_t attr, unsigned top, unsigned left, unsigned bottom, unsigned right)
+{
+	if (bottom > 24) bottom = 24;
+	if (right > 79) right = 79;
+	if (top > bottom || left > right) return;
+	unsigned height = bottom - top + 1;
+	if (!lines || lines > height) lines = height;
+	for (unsigned row = top; row <= bottom; row++) {
+		uint8_t *to = M + 0xb8000 + (row * 80 + left) * 2;
+		if (row + lines <= bottom) memcpy(to, to + lines * 160, (right - left + 1) * 2);
+		else for (unsigned col = left; col <= right; col++, to += 2) { to[0] = ' '; to[1] = attr; }
+	}
+}
+
+static void text_scroll_down(unsigned lines, uint8_t attr, unsigned top, unsigned left, unsigned bottom, unsigned right)
+{
+	if (bottom > 24) bottom = 24;
+	if (right > 79) right = 79;
+	if (top > bottom || left > right) return;
+	unsigned height = bottom - top + 1;
+	if (!lines || lines > height) lines = height;
+	for (unsigned row = bottom + 1; row-- > top;) {
+		uint8_t *to = M + 0xb8000 + (row * 80 + left) * 2;
+		if (row >= top + lines) memcpy(to, to - lines * 160, (right - left + 1) * 2);
+		else for (unsigned col = left; col <= right; col++, to += 2) { to[0] = ' '; to[1] = attr; }
+	}
+}
+
+/* A character as the BIOS teletype (INT 10h AH=0Eh) writes it: at the cursor, keeping the
+ * attribute there; bell, backspace, line feed and carriage return move the cursor, and the screen
+ * scrolls at the bottom. */
+static void teletype(uint8_t c)
+{
+	unsigned row = cursor_row(), col = cursor_col();
+	switch (c) {
+	case 7: return;
+	case 8: if (col) col--; break;
+	case 10: row++; break;
+	case 13: col = 0; break;
+	default:
+		M[0xb8000 + (row * 80 + col) * 2] = c;
+		if (++col == 80) { col = 0; row++; }
+		break;
+	}
+	if (row > 24) {
+		text_scroll_up(1, M[0xb8000 + 24 * 160 + 1], 0, 0, 24, 79);
+		row = 24;
+	}
+	cursor_to(row, col);
+}
+
+/* What DOS writes to the console (dos.cpp) also goes to the screen in text mode. */
+void vga_console(const uint8_t *s, size_t n)
+{
+	if (!text_mode()) return;
+	for (size_t i = 0; i < n; i++) teletype(s[i]);
+}
+
 /* ---- frames for the host ---- */
 
 /* The picture as it is now: its width and height, the pixels into buf (up to 640x480 bytes). */
 int vga_picture(uint8_t *buf, int *w, int *h)
 {
-	if (svga) {
+	if (text_mode()) {
+		*w = 640;
+		*h = 400;
+		text_picture(buf);
+	}
+	else if (svga) {
 		bank_flush();
 		*w = 640;
 		*h = 480;
@@ -125,7 +230,8 @@ void vga_poll(uint64_t now)
 	memcpy(frame_palette, wc_palette, sizeof frame_palette);
 	frame_count++;
 	pthread_mutex_unlock(&frame_lock);
-	if (pc_warping() && !pc_script_warp()) { /* the quick start ends with the first visible picture */
+	/* the quick start ends with the first visible picture (not DOS's text) */
+	if (pc_warping() && !pc_script_warp() && !text_mode()) {
 		for (int i = 0; i < frame_w * frame_h; i++) {
 			const uint8_t *c = frame_palette + 3 * frame_pixels[i];
 			if (c[0] | c[1] | c[2]) {
@@ -195,12 +301,31 @@ void vga_out(uint64_t port, uint64_t value)
 	}
 }
 
+/* the first 16 DAC entries after a mode set: the default EGA colours (text mode's colours here) */
+static const uint8_t ega[16][3] = {
+	{ 0, 0, 0 }, { 0, 0, 42 }, { 0, 42, 0 }, { 0, 42, 42 }, { 42, 0, 0 }, { 42, 0, 42 }, { 42, 21, 0 },
+	{ 42, 42, 42 }, { 21, 21, 21 }, { 21, 21, 63 }, { 21, 63, 21 }, { 21, 63, 63 }, { 63, 21, 21 },
+	{ 63, 21, 63 }, { 63, 63, 21 }, { 63, 63, 63 },
+};
+
+static void text_clear(void)
+{
+	for (unsigned i = 0; i < 80 * 25; i++) {
+		M[0xb8000 + 2 * i] = ' ';
+		M[0xb8000 + 2 * i + 1] = 7;
+	}
+}
+
 void vga_init(void)
 {
 	start_ns = pc_now_ns();
+	memcpy(wc_palette, ega, sizeof ega); /* the program starts in text mode, as DOS left it */
+	text_clear();
+	M[0x460] = 0x0e; /* cursor shape: lines 13-14 */
+	M[0x461] = 0x0d;
 }
 
-/* ---- video BIOS (INT 10h): modes and the DAC; text output is not shown ---- */
+/* ---- video BIOS (INT 10h): modes, the DAC, and text mode's cursor and characters ---- */
 
 
 void vga_bios(uint32_t at);
@@ -324,16 +449,44 @@ void vga_bios(uint32_t at)
 		M[0x449] = mode;
 		mwr(0x44a, 2, mode == 0x13 || mode <= 1 ? 40 : 80);
 		if (mode == 0x13 && !(al & 0x80)) memset(M + 0xa0000, 0, 0x10000);
-		/* the first 16 DAC entries: the default EGA colours */
-		static const uint8_t ega[16][3] = {
-			{ 0, 0, 0 }, { 0, 0, 42 }, { 0, 42, 0 }, { 0, 42, 42 }, { 42, 0, 0 }, { 42, 0, 42 }, { 42, 21, 0 },
-			{ 42, 42, 42 }, { 21, 21, 21 }, { 21, 21, 63 }, { 21, 63, 21 }, { 21, 63, 63 }, { 63, 21, 21 },
-			{ 63, 21, 63 }, { 63, 63, 21 }, { 63, 63, 63 },
-		};
+		if (mode <= 3 && !(al & 0x80)) text_clear();
+		cursor_to(0, 0);
 		memset(wc_palette, 0, sizeof wc_palette);
 		memcpy(wc_palette, ega, sizeof ega);
 		break;
 	}
+	case 0x01: /* cursor shape: CH start line (bit 5: hidden), CL end line */
+		M[0x460] = (uint8_t)cx;
+		M[0x461] = (uint8_t)(cx >> 8);
+		break;
+	case 0x02: /* cursor position: DH row, DL column (page 0 only) */
+		if (!(bx >> 8)) cursor_to(dx >> 8 < 25 ? dx >> 8 : 24, (dx & 0xff) < 80 ? dx & 0xff : 79);
+		break;
+	case 0x03: /* cursor position and shape */
+		wr(R_DX, 2, cursor_row() << 8 | cursor_col());
+		wr(R_CX, 2, M[0x461] << 8 | M[0x460]);
+		break;
+	case 0x06: /* scroll up AL lines (0: clear) in CH,CL-DH,DL, filling with attribute BH */
+		if (text_mode()) text_scroll_up(al, (uint8_t)(bx >> 8), cx >> 8, cx & 0xff, dx >> 8, dx & 0xff);
+		break;
+	case 0x07: /* scroll down */
+		if (text_mode()) text_scroll_down(al, (uint8_t)(bx >> 8), cx >> 8, cx & 0xff, dx >> 8, dx & 0xff);
+		break;
+	case 0x08: /* character and attribute at the cursor */
+		if (text_mode()) wr(R_AX, 2, mrd(0xb8000 + (cursor_row() * 80 + cursor_col()) * 2, 2));
+		break;
+	case 0x09: /* write AL CX times at the cursor, with attribute BL (0Ah: keeping the attribute) */
+	case 0x0a:
+		if (text_mode()) {
+			for (unsigned i = 0, at = cursor_row() * 80 + cursor_col(); i < cx && at + i < 80 * 25; i++) {
+				M[0xb8000 + (at + i) * 2] = al;
+				if (ah == 0x09) M[0xb8000 + (at + i) * 2 + 1] = (uint8_t)bx;
+			}
+		}
+		break;
+	case 0x0e: /* teletype */
+		if (text_mode()) teletype(al);
+		break;
 	case 0x0f: /* get mode */
 		wr(R_AL, 1, M[0x449]);
 		wr(R_AH, 1, M[0x44a]);
