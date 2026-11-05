@@ -455,6 +455,14 @@ static int SDLCALL game_thread(void *arg)
 {
 	/* the recompiled code nests C calls as deeply as the game nests calls and interrupts: a stack
 	 * of 256 MB, which std::thread can't ask for, but SDL's threads can */
+	if (window) {
+		/* controllers plugged in already: the game looks for a joystick right at its start (and only
+		 * then offers the calibration that writes WC3\JOY0.DAT), before the loop below would see them */
+		SDL_PumpEvents();
+		SDL_Event e;
+		while (SDL_PeepEvents(&e, 1, SDL_GETEVENT, SDL_EVENT_JOYSTICK_ADDED, SDL_EVENT_JOYSTICK_ADDED) == 1) joystick(&e);
+		while (SDL_PeepEvents(&e, 1, SDL_GETEVENT, SDL_EVENT_GAMEPAD_ADDED, SDL_EVENT_GAMEPAD_ADDED) == 1) gamepad(&e);
+	}
 	SDL_PropertiesID props = SDL_CreateProperties();
 	SDL_SetPointerProperty(props, SDL_PROP_THREAD_CREATE_ENTRY_FUNCTION_POINTER, (void *)game_thread);
 	SDL_SetPointerProperty(props, SDL_PROP_THREAD_CREATE_USERDATA_POINTER, (void *)game);

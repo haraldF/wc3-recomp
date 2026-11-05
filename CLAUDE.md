@@ -45,7 +45,7 @@ generated and ignored.
 - With a joystick present (ours is while the host has a controller; `WC_JOYSTICK=1` always, `=0`
   never) and no `WC3\JOY0.DAT`, it calibrates in text mode: the prompts (centre, top left, bottom
   right, each + a button, then Esc) under a grid, the reading printed again and again ("Joystick
-  val (x, y)", also in the terminal); any other key skips it. Alt-J (hangar, flight) shows the same
+  val (x, y)", also in the terminal); any other key skips it. Only that startup calibration writes the file; Alt-J's is kept in memory. The host registers controllers already plugged in before the game thread starts: from the event loop they came too late, the game saw no joystick and never calibrated or read `JOY0.DAT`. Alt-J (hangar, flight) shows the same
   screen (a240, called from five places), ending with the scaled reading, (0, 0) when centred, until
   Esc: in the window it was black, which looked like a hang. It times the one-shots with the PIT (bc998, channel 0 read-back), so they
   last emulated time, and the speed limit doesn't sleep during one: before, the stick was always
