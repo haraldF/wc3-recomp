@@ -13,6 +13,7 @@
     "typecheck": "tsc --noEmit",
     "discover": "node src/cli.ts discover",
     "play": "node src/cli.ts play",
+    "find-entries": "node src/find-entries.ts",
     "web": "node src/cli.ts web",
     "serve": "node src/serve.ts"
   },

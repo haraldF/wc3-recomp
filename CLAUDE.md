@@ -162,7 +162,14 @@ generated and ignored.
 - Recompiling: each captured driver costs a Ghidra run, so `doRecomp` redoes a driver only when its
   bytes, its entries or `WcRecomp.java` changed (`drv_<name>.stamp` in `out/recomp/`).
 - Missing code: runtime exits 4 (`wc: missing code at X`); `npm run discover` adds X to
-  `entries.txt` (repository root; commit it after discover rounds) and recompiles. Bugs elsewhere
+  `entries.txt` (repository root; commit it after discover rounds) and recompiles.
+  `npm run find-entries` (`src/find-entries.ts`) finds most of them before the game does: of the
+  first 277 found by playing, all were referenced by a dword in the image and 263 started right
+  after a RET or JMP, in a gap no recompiled instruction covers. It sweeps those gaps as the
+  generator decodes fragments (gap starts, calls, tables of code pointers at any alignment,
+  prologues after data) and leaves out what decodes as junk (data in the code: constant and switch
+  tables). Needs GNU objdump with i386 (Homebrew's binutils, found by itself; else `OBJDUMP=`). The
+  first run added 891 entries (~64 KB of the 85 KB not recompiled; the rest is data). Bugs elsewhere
   produce garbage addresses: check an entry is real code before keeping it.
 - Shadow return stack (`push_ret`/`pop_ret`/`is_return`): a jump to the address the current call
   returns to becomes a C return. A RET/IRET to an address a frame further up expects unwinds to it
