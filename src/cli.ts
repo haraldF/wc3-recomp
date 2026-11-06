@@ -207,11 +207,7 @@ async function main(): Promise<void> {
       for (let round = 1; round <= 50; round++) {
         const env = play ? { ...process.env, WC_LOADED_DIR: capturesDir }
           : { ...process.env, WC_LOADED_DIR: capturesDir, WC_HEADLESS: "1", WC_CYCLES: process.env.WC_CYCLES ?? "max" };
-        const res = spawnSync(wcExe, [gameDir, ...positionals.slice(1)], {
-          encoding: "utf8", timeout: play ? undefined : Number(values.seconds) * 1000, env,
-          stdio: ["inherit", play ? "inherit" : "pipe", "pipe"],
-        });
-        if (play) process.stderr.write(res.stderr ?? "");
+        const res = await runGame([gameDir, ...positionals.slice(1)], env, play, play ? undefined : Number(values.seconds) * 1000);
         const loaded = /wc: call into code loaded at runtime at [0-9a-f]+:([0-9a-f]+) \((flat|own segment), captured from offset ([0-9a-f]+)/
           .exec(res.stderr ?? "");
         const capture = /wc: saved loaded code to (.+)/.exec(res.stderr ?? "")?.[1];
@@ -248,8 +244,7 @@ async function main(): Promise<void> {
         const missing = /wc: missing code at ([0-9a-f]+)/.exec(res.stderr ?? "")?.[1];
         if (res.status !== 4 || !missing) {
           if (play) break;
-          const timedOut = (res.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT";
-          console.log(`round ${round}: ` + (timedOut ? `wc3 was still running after ${values.seconds} s, no missing code so far`
+          console.log(`round ${round}: ` + (res.timedOut ? `wc3 was still running after ${values.seconds} s, no missing code so far`
             : `wc3 stopped (exit ${res.status ?? res.signal}):`));
           console.log((res.stderr ?? "").split("\n").slice(-8).join("\n"));
           break;
@@ -270,6 +265,32 @@ async function main(): Promise<void> {
       console.error("usage: node src/cli.ts <unpack|decompile|recomp|build|web|discover|play> [--iso file] [--out dir] [--seconds n]");
       process.exit(2);
   }
+}
+
+// Runs the game. Its stderr goes on to ours as it comes (in play; a trace can be gigabytes) and its
+// end is kept, where the runtime reports missing code. Without a window its stdout is dropped.
+function runGame(args: string[], env: NodeJS.ProcessEnv, play: boolean, timeoutMs?: number):
+  Promise<{ status: number | null; signal: NodeJS.Signals | null; stderr: string; timedOut: boolean }> {
+  const KEEP = 4 << 20;
+  return new Promise((resolve, reject) => {
+    const child = spawn(wcExe, args, { env, stdio: ["inherit", play ? "inherit" : "ignore", "pipe"] });
+    let stderr = "", timedOut = false;
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      if (play) process.stderr.write(chunk);
+      stderr += chunk;
+      if (stderr.length > 2 * KEEP) stderr = stderr.slice(-KEEP);
+    });
+    const timer = timeoutMs === undefined ? undefined : setTimeout(() => {
+      timedOut = true;
+      child.kill();
+    }, timeoutMs);
+    child.on("error", reject);
+    child.on("close", (status, signal) => {
+      clearTimeout(timer);
+      resolve({ status, signal, stderr, timedOut });
+    });
+  });
 }
 
 function exec(cmd: string, args: string[]): Promise<void> {
